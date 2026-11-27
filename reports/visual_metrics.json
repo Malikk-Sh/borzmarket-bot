@@ -1,0 +1,170 @@
+{
+ "1": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    1637
+   ],
+   "screen_dp": [
+    256,
+    388
+   ],
+   "screen_area_dp2": 99328,
+   "render_s": 0.083,
+   "bytes": 85437
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.038,
+   "bytes": 73102
+  }
+ },
+ "2": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    758
+   ],
+   "screen_dp": [
+    338,
+    237
+   ],
+   "screen_area_dp2": 80106,
+   "render_s": 0.056,
+   "bytes": 95650
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.044,
+   "bytes": 99948
+  }
+ },
+ "3": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    1184
+   ],
+   "screen_dp": [
+    288,
+    315
+   ],
+   "screen_area_dp2": 90720,
+   "render_s": 0.091,
+   "bytes": 128780
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.051,
+   "bytes": 115036
+  }
+ },
+ "4": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    1504
+   ],
+   "screen_dp": [
+    278,
+    388
+   ],
+   "screen_area_dp2": 107864,
+   "render_s": 0.117,
+   "bytes": 175703
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.059,
+   "bytes": 138880
+  }
+ },
+ "5": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    1324
+   ],
+   "screen_dp": [
+    288,
+    353
+   ],
+   "screen_area_dp2": 101664,
+   "render_s": 0.116,
+   "bytes": 176269
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.07,
+   "bytes": 151590
+  }
+ },
+ "6": {
+  "v9.1": {
+   "pixels": [
+    1080,
+    1206
+   ],
+   "screen_dp": [
+    288,
+    321
+   ],
+   "screen_area_dp2": 92448,
+   "render_s": 0.117,
+   "bytes": 184857
+  },
+  "v10": {
+   "pixels": [
+    1080,
+    1080
+   ],
+   "screen_dp": [
+    338,
+    338
+   ],
+   "screen_area_dp2": 114244,
+   "render_s": 0.073,
+   "bytes": 162891
+  }
+ }
+}
