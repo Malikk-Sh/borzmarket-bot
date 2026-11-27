@@ -87,8 +87,8 @@
     "ozon_page": 1,
     "wbcon_ozon": 1
    },
-   "seconds": 2.7,
-   "warning": "Страница Ozon — HTTP 403 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "seconds": 2.71,
+   "warning": "Страница Ozon — HTTP 403 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:14 МСК).",
    "title_ok": false,
    "title_got": false,
    "provisional_title": false,
@@ -115,7 +115,7 @@
     "wbcon_ozon": 1
    },
    "seconds": 3.31,
-   "warning": "Страница Ozon — HTTP 403 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "warning": "Страница Ozon — HTTP 403 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:14 МСК).",
    "title_ok": false,
    "title_got": true,
    "provisional_title": true,
@@ -167,8 +167,8 @@
     "ozon_page": 1,
     "wbcon_ozon": 1
    },
-   "seconds": 2.71,
-   "warning": "Страница Ozon — HTTP 200 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "seconds": 2.7,
+   "warning": "Страница Ozon — HTTP 200 (страница проверки доступа). Ozon проверяет отпечаток браузера: установите curl_cffi (pip install curl_cffi) и перезапустите бота WBCON достиг лимита запросов. Повторите через 59 с (02:14 МСК).",
    "title_ok": false,
    "title_got": false,
    "provisional_title": false,
@@ -194,7 +194,7 @@
     "wbcon_ozon": 1
    },
    "seconds": 2.71,
-   "warning": "Страница Ozon — в ответе нет данных этого товара WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "warning": "Страница Ozon — в ответе нет данных этого товара WBCON достиг лимита запросов. Повторите через 59 с (02:14 МСК).",
    "title_ok": false,
    "title_got": false,
    "provisional_title": false,
@@ -208,7 +208,7 @@
    "ready": false,
    "false_ready": false,
    "source": "",
-   "note": "Страница Ozon — в ответе нет данных этого товара WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "note": "Страница Ozon — в ответе нет данных этого товара WBCON достиг лимита запросов. Повторите через 59 с (02:14 МСК).",
    "title": "",
    "price": null
   },
@@ -273,7 +273,7 @@
     "wbcon_ozon": 1
    },
    "seconds": 2.96,
-   "warning": "Ozon вернул карточку с неполными данными. WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "warning": "Ozon вернул карточку с неполными данными. WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title_ok": true,
    "title_got": true,
    "provisional_title": false,
@@ -287,7 +287,7 @@
    "ready": false,
    "false_ready": false,
    "source": "",
-   "note": "Ozon вернул карточку с неполными данными. WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "note": "Ozon вернул карточку с неполными данными. WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title": "Рюкзак мужской городской для ноутбука с USB, трансформер, ручная кладь, для кома",
    "price": null
   },
@@ -300,7 +300,7 @@
     "wbcon_ozon": 1
    },
    "seconds": 3.21,
-   "warning": "WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК). Фото не удалось скачать.",
+   "warning": "WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК). Фото не удалось скачать.",
    "title_ok": true,
    "title_got": true,
    "provisional_title": false,
@@ -314,7 +314,7 @@
    "ready": false,
    "false_ready": false,
    "source": "ozon.webPrice",
-   "note": "WBCON достиг лимита запросов. Повторите через 59 с (02:03 МСК).",
+   "note": "WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title": "Рюкзак мужской городской для ноутбука с USB, трансформер, ручная кладь, для кома",
    "price": "2969.0"
   },
@@ -325,7 +325,7 @@
     "ozon_page": 2,
     "ozon_img": 1
    },
-   "seconds": 3.3,
+   "seconds": 3.42,
    "warning": "",
    "title_ok": true,
    "title_got": true,
@@ -437,7 +437,7 @@
     "wbcon_wb": 1
    },
    "seconds": 1.91,
-   "warning": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "warning": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title_ok": true,
    "title_got": true,
    "provisional_title": false,
@@ -451,7 +451,7 @@
    "ready": false,
    "false_ready": false,
    "source": "",
-   "note": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "note": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title": "Робот-пылесос с влажной уборкой и лидаром",
    "price": null
   },
@@ -548,7 +548,7 @@
     "wbcon_wb": 1
    },
    "seconds": 2.41,
-   "warning": "Цены WB — в ответе нет этого артикула. Цены WB www.wildberries.ru — HTTP 498 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "warning": "Цены WB — в ответе нет этого артикула. Цены WB www.wildberries.ru — HTTP 498 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title_ok": true,
    "title_got": true,
    "provisional_title": false,
@@ -562,7 +562,7 @@
    "ready": false,
    "false_ready": false,
    "source": "",
-   "note": "Цены WB — в ответе нет этого артикула. Цены WB www.wildberries.ru — HTTP 498 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "note": "Цены WB — в ответе нет этого артикула. Цены WB www.wildberries.ru — HTTP 498 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title": "Термос вакуумный 500 мл",
    "price": null
   },
@@ -655,7 +655,7 @@
     "wb_basket": 1,
     "wb_img": 1
    },
-   "seconds": 1.72,
+   "seconds": 2.04,
    "warning": "",
    "title_ok": true,
    "title_got": true,
@@ -685,7 +685,7 @@
     "wbcon_wb": 1
    },
    "seconds": 1.91,
-   "warning": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "warning": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title_ok": true,
    "title_got": true,
    "provisional_title": false,
@@ -699,7 +699,7 @@
    "ready": false,
    "false_ready": false,
    "source": "",
-   "note": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:04 МСК).",
+   "note": "Цены WB card.wb.ru — HTTP 403 WBCON достиг лимита запросов. Повторите через 59 с (02:15 МСК).",
    "title": "Робот-пылесос с влажной уборкой и лидаром",
    "price": null
   }
@@ -882,7 +882,7 @@
      "ready": false,
      "false_ready": false,
      "source": "",
-     "note": "Страница Ozon — пауза после блокировки, через 89 с (02:04 МСК) Лимит WBCON. Попробуйте через 57 с."
+     "note": "Страница Ozon — пауза после блокировки, через 89 с (02:16 МСК) Лимит WBCON. Попробуйте через 57 с."
     },
     {
      "title_ok": true,
@@ -938,7 +938,7 @@
  "warm": [
   {
    "id": "oz_ok_sku",
-   "cold_s": 1.45,
+   "cold_s": 1.46,
    "warm_s": 0.25,
    "cold_calls": 2,
    "warm_calls": 1,
@@ -995,7 +995,7 @@
    "calls": 37,
    "paid_calls": 0,
    "seconds_median": 2.71,
-   "seconds_max": 3.31
+   "seconds_max": 3.42
   },
   "wb": {
    "n": 12,

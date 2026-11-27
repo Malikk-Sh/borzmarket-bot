@@ -1,0 +1,92 @@
+{
+ "actions": [
+  "сообщение: wb:866768707",
+  "сообщение: 41 133",
+  "нажатие: ＋ Товар",
+  "сообщение: ozon:1526882900",
+  "нажатие: ✏️ 2",
+  "нажатие: ↑ Раньше",
+  "нажатие: 📅 Сегодня 10:00"
+ ],
+ "total_actions": 7,
+ "user_messages": 3,
+ "taps": 4,
+ "bot_messages": 9,
+ "steps": [
+  {
+   "step": "товар получен, цены нет",
+   "actions": 1,
+   "missing": [
+    [
+     "цена"
+    ]
+   ],
+   "state": "draft",
+   "order": [
+    "866768707"
+   ]
+  },
+  {
+   "step": "цена введена",
+   "actions": 2,
+   "missing": [
+    []
+   ],
+   "state": "draft",
+   "order": [
+    "866768707"
+   ]
+  },
+  {
+   "step": "подборка из двух",
+   "actions": 4,
+   "missing": [
+    [],
+    []
+   ],
+   "state": "draft",
+   "order": [
+    "866768707",
+    "1526882900"
+   ]
+  },
+  {
+   "step": "порядок изменён",
+   "actions": 6,
+   "missing": [
+    [],
+    []
+   ],
+   "state": "draft",
+   "order": [
+    "1526882900",
+    "866768707"
+   ]
+  },
+  {
+   "step": "в очереди",
+   "actions": 7,
+   "missing": [
+    [],
+    []
+   ],
+   "state": "queued",
+   "order": [
+    "1526882900",
+    "866768707"
+   ]
+  }
+ ],
+ "final_state": "queued",
+ "due_at": 1795849200,
+ "network_calls": {
+  "wb_detail": 1,
+  "wb_basket": 1,
+  "wb_history": 1,
+  "wb_img": 1,
+  "wbcon_wb": 1,
+  "ozon_page": 1,
+  "ozon_img": 1
+ },
+ "version": 10
+}

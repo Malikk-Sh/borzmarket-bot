@@ -34,11 +34,11 @@ def migrate(source: Path, target: Path) -> None:
     old_db, new_db = source / "borzmarket.sqlite3", target / "borzmarket.sqlite3"
     if old_db.is_file() and not new_db.exists():
         with TemporaryDirectory(dir=target) as work:
-            copy = Path(work) / new_db.name
+            staged = Path(work) / new_db.name
             with closing(sqlite3.connect(old_db.resolve().as_uri() + "?mode=ro", uri=True)) as origin:
-                with closing(sqlite3.connect(copy)) as backup_db:
+                with closing(sqlite3.connect(staged)) as backup_db:
                     origin.backup(backup_db)
-            copy.replace(new_db)
+            staged.replace(new_db)
         print("Черновики и очередь перенесены.")
     elif old_db.is_file() and new_db.exists():
         plan = reconcile(new_db, old_db, unknown="keep", apply=False)

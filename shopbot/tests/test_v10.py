@@ -502,6 +502,42 @@ class StorageTests(Base):
             state.STATE.block("wbcon.wb", time.time() + 60, "HTTP 429")
             self.assertTrue(state.STATE.blocked("wbcon.wb"))
 
+    def test_older_schema_without_v9_columns_still_opens(self):
+        """Имитация базы v8.1: нет колонок, добавленных в v9, и полей цены в черновике."""
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "borzmarket.sqlite3"
+            conn = sqlite3.connect(path)
+            conn.executescript("""
+                CREATE TABLE drafts (id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                    heading TEXT NOT NULL, items TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (state IN ('draft', 'queued', 'sending', 'uncertain')), revision INTEGER NOT NULL DEFAULT 0,
+                    view_id INTEGER, due_at INTEGER, destination TEXT, sending_at INTEGER,
+                    error TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
+                CREATE TABLE photos (draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+                    item_number INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (draft_id, item_number));
+                CREATE TABLE price_watch (key TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                    marketplace TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL, price_note TEXT NOT NULL,
+                    reference TEXT NOT NULL, last_notice TEXT, photo BLOB, post_url TEXT NOT NULL,
+                    check_at INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0);
+            """)
+            old_item = [{"marketplace": "wb", "title": "Термос", "url": WB, "price": "1299", "old_price": None,
+                         "price_note": "", "image_urls": [], "photo_index": 0}]
+            conn.execute("INSERT INTO drafts (id, owner_id, chat_id, heading, items, state, due_at, destination, "
+                         "updated_at) VALUES ('old', 1, 2, '', ?, 'queued', ?, '@chan', 0)",
+                         (json.dumps(old_item), int(time.time()) + 600))
+            conn.execute("INSERT INTO photos VALUES ('old', 0, ?)", (jpeg(),))
+            conn.execute("INSERT INTO price_watch (key, owner_id, chat_id, marketplace, title, url, price_note, "
+                         "reference, post_url, check_at) VALUES ('k', 1, 2, 'wb', 'Термос', ?, '', '1299', '', 0)", (WB,))
+            conn.commit()
+            conn.close()
+            store = DraftStore(path)
+            self.addCleanup(store.close)
+            draft = store.get("old")
+            self.assertEqual((draft.state, draft.layout, draft.items[0].product.price), ("queued", "auto", 1299))
+            self.assertTrue(draft.ready)
+            watch = store.history.claim_watch(int(time.time()))
+            self.assertEqual((watch.source, watch.product.wb_dest), ("", ""))
+
     def test_rollback_does_not_resend_posts_published_by_the_new_version(self):
         with tempfile.TemporaryDirectory() as root:
             old, new = Path(root) / "old" / "borzmarket.sqlite3", Path(root) / "new" / "borzmarket.sqlite3"

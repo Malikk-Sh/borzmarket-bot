@@ -1,0 +1,56 @@
+== Платформа: x86_64, Python 3.13.18, 2026-11-27T23:16:54Z
+== 1. Прежняя установка v9.1 с данными
+v9.1 распакована в <проверка>/home/borzmarket-v9-1/shopbot
+
+draft=50b3829cb63a4a2c queued=edde275dfa224c2e,3f4b8c2612f64fa1 sent=13994a4b1c394b4e
+== 2. Установка v10 блоком из README (из папки прежней версии)
+
+
+Настройки перенесены.
+Черновики и очередь перенесены.
+Готово. Резервная копия базы: <проверка>/home/borzmarket-backup-before-v10.sqlite3
+aiogram           3.34.0
+curl_cffi         0.17.0
+httpx             0.29.0
+pillow            13.0.0
+python-dotenv     1.2.4
+== 3. Тесты из распакованного архива
+Ran 124 tests in 4.653s
+
+OK
+== 4. CLI
+usage: prices.py [-h] [--direct-only] [--json] [--diag] [--html ФАЙЛ]
+                 [--no-memory]
+                 products [products ...]
+импорт модулей: ok
+== 5. Перенос: настройки, черновик с фото, очередь, история
+CHANNEL_ID=@borzmarket_channel
+AUTO_POST=0
+WB_DEST=-1257786
+QUEUE_SLOTS=10:00,13:00,16:00,19:00
+черновики/очередь/ближайший: (1, 2)
+записи: [('draft', True), ('queued', True), ('queued', True)]
+история: [('sent', 'https://t.me/borzmarket_channel/77')]
+наблюдения за ценой: (1,)
+== 6. Запуск bot.main() без Telegram
+main() завершился штатно: {'drafts': (1, 2, 1795825021), 'state_tables': ['source_state', 'quotes']}
+== 7. Рендер примеров на этой машине
+19
+== 8. v10 публикует одну запись из очереди (имитация), затем откат
+v10 отправила: edde275dfa224c2e
+Главная база: <проверка>/home/borzmarket-v10-0/shopbot/borzmarket.sqlite3
+Старая база: <проверка>/home/borzmarket-v9-1/shopbot/borzmarket.sqlite3
+
+🗑 «Робот-пылесос» — уже опубликовано другой версией 28.11 02:17 МСК · https://t.me/borzmarket_channel/78. Убираю из очереди.
+
+Это план. Чтобы выполнить, добавьте --apply.
+Готово. Копия старой базы до сверки: <проверка>/home/borzmarket-v9-1/shopbot/borzmarket.sqlite3.before-sync-20261128-021719
+Запуск прежней версии: cd <проверка>/home/borzmarket-v9-1/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
+старая очередь после сверки: [('draft', 1), ('queued', 1)]
+старая история: 2 постов
+== 9. Повторная миграция ничего не ломает
+Настройки уже есть, оставляю как есть.
+База уже есть, очередь совпадает с прежней версией.
+== 10. В архиве нет секретов и рабочих данных
+лишнего нет
+== Проверка завершена
