@@ -113,6 +113,25 @@ def main():
         caption = collage.post_caption(draft)
         (args.out / f"caption_{count}.html").write_text(caption, encoding="utf-8")
     contact_sheet(previews, labels, args.out / "contact_sheet.jpg")
+    # Одиночные карточки для каждого демо-товара: горизонтальное фото, живой фон, длинное
+    # название с условием оплаты, черновик без цены. Товар без фото пропускается: такой пост не уйдёт.
+    singles, single_labels = [], []
+    for number, spec in enumerate(demo_assets.DEMO, 1):
+        items = make_items(card, drafts, demo_assets, number)[-1:]
+        if not items[0].photo:
+            continue
+        draft = make_draft(drafts, items)
+        started = time.perf_counter()
+        jpeg = collage.post_photo(draft)
+        took = time.perf_counter() - started
+        name = f"single_{number}.jpg"
+        (args.out / name).write_bytes(jpeg)
+        (args.out / f"single_caption_{number}.html").write_text(collage.post_caption(draft), encoding="utf-8")
+        preview = phone_preview(jpeg)
+        singles.append(preview)
+        single_labels.append(f"{spec['photo']}")
+        timings[name] = {"bytes": len(jpeg), "median_s": round(took, 3)}
+    contact_sheet(singles, single_labels, args.out / "contact_sheet_singles.jpg")
     (args.out / "timings.json").write_text(json.dumps(timings, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(timings, ensure_ascii=False, indent=2))
 
