@@ -439,16 +439,52 @@ def draw_badges(tile, box, item, index, style: Style):
                   fill="white", anchor="mm")
 
 
+def contain_area(ratio: float, width: float, height: float) -> float:
+    """Площадь товара с пропорциями ratio, вписанного в рамку."""
+    if width <= 0 or height <= 0:
+        return 0.0
+    return min(width, height * ratio) * min(height, width / ratio)
+
+
+def tile_mode(w: int, h: int, item, style: Style, index) -> tuple[str, int]:
+    """Сверху подпись или сбоку: выбирается компоновка, где сам товар крупнее.
+
+    Высокий товар в широкой плитке ставится слева от текста, широкий — над текстом.
+    Возвращает режим и ширину фото для бокового режима.
+    """
+    if not item.photo:
+        return "stack", w
+    ratio = aspect(item.photo)
+    if ratio >= 0.7:
+        return "stack", w  # сбоку подпись нужна только высоким товарам: термос, пароочиститель
+    pad = round(0.06 * min(w, h))
+    reserve = round(style.number * 0.55) + 14 if index is not None else 0
+    footer = min(footer_height(item, w, style), h // 2)
+    stacked = contain_area(ratio, w - 2 * pad, h - footer - max(pad, reserve) - pad)
+    text_w = max(200, round(w * 0.46))
+    photo_w = w - text_w
+    if photo_w < 140:
+        return "stack", w
+    side = contain_area(ratio, photo_w - 2 * pad, h - max(pad, reserve) - pad)
+    return ("side", photo_w) if side > stacked * 1.3 else ("stack", w)
+
+
 def draw_tile(canvas, box, item, index=None):
-    """Плитка товара: фото крупно сверху, название и цена снизу."""
+    """Плитка товара: товар крупно, название и цена снизу или сбоку — где товару больше места."""
     x, y, w, h = box
     style = style_for(w)
-    footer = min(footer_height(item, w, style), h // 2)
     tile = Image.new("RGB", (w, h), "white")
     reserve = round(style.number * 0.55) + 14 if index is not None else 0
-    place_photo(tile, (0, 0, w, h - footer), item.photo, top_reserve=reserve)
-    draw_badges(tile, (0, 0, w, h - footer), item, index, style)
-    draw_footer(tile, (0, h - footer, w, footer), item, style)
+    mode, photo_w = tile_mode(w, h, item, style, index)
+    if mode == "side":
+        place_photo(tile, (0, 0, photo_w, h), item.photo, top_reserve=reserve)
+        draw_badges(tile, (0, 0, photo_w, h), item, index, style)
+        draw_side_text(tile, (photo_w, 0, w - photo_w, h), item, STYLES["s"])
+    else:
+        footer = min(footer_height(item, w, style), h // 2)
+        place_photo(tile, (0, 0, w, h - footer), item.photo, top_reserve=reserve)
+        draw_badges(tile, (0, 0, w, h - footer), item, index, style)
+        draw_footer(tile, (0, h - footer, w, footer), item, style)
     drop_shadow(canvas, (x, y, w, h), RADIUS)
     canvas.paste(tile, (x, y), rounded_mask((w, h), RADIUS))
 
@@ -473,43 +509,53 @@ def draw_single(canvas, item):
     canvas.paste(tile, (x, y), rounded_mask((w, h), RADIUS + 6))
 
 
-def draw_side_text(tile, box, item):
-    """Текстовая колонка справа от высокого товара: название до пяти строк, крупная цена внизу."""
+def draw_side_text(tile, box, item, style: Style | None = None):
+    """Текстовая колонка справа от высокого товара: название сверху, крупная цена внизу."""
     x, y, w, h = box
     p = item.product
     draw = ImageDraw.Draw(tile)
-    pad = 36
+    big = style is None
+    title_size = 44 if big else style.title
+    price_size = 96 if big else style.price
+    note_size = 32 if big else style.note
+    old_size = 38 if big else style.old
+    pad = 36 if big else max(14, style.pad)
     inner = w - 2 * pad
-    title_face = font(44, 700)
-    top = y + pad + 6
+    title_face = font(title_size, 700)
+    line_h = round(title_size * 1.22)
+    room_lines = max(1, int((h - 2 * pad - price_size * 2.4) // line_h))
+    top = y + pad + (6 if big else 0)
     color = INK if p.title and not p.provisional_title else WARN
-    for line in wrap_lines(p.title or "Добавьте название", title_face, inner, 5):
+    for line in wrap_lines(p.title or "Добавьте название", title_face, inner, min(5, room_lines)):
         draw.text((x + pad, top), line, font=title_face, fill=color)
-        top += 54
-    chip_face = font(26, 800)
+        top += line_h
+    chip_size = 26 if big else style.chip
+    chip_face = font(chip_size, 800)
     name = MARKET_SHORT.get(p.marketplace, p.marketplace)
-    chip_w = round(chip_face.getlength(name)) + 30
+    chip_w = round(chip_face.getlength(name)) + chip_size + 4
+    chip_h = round(chip_size * 1.6)
     if badges_enabled():
-        pill(tile, (x + pad, top + 14, x + pad + chip_w, top + 56), MARKET_COLOR.get(p.marketplace, GREEN))
-        draw.text((x + pad + chip_w / 2, top + 36), name, font=chip_face, fill="white", anchor="mm")
+        pill(tile, (x + pad, top + 10, x + pad + chip_w, top + 10 + chip_h), MARKET_COLOR.get(p.marketplace, GREEN))
+        draw.text((x + pad + chip_w / 2, top + 10 + chip_h / 2 + 1), name, font=chip_face, fill="white", anchor="mm")
     else:
-        draw.text((x + pad, top + 36), name, font=chip_face, fill=MUTED, anchor="lm")
+        draw.text((x + pad, top + 10 + chip_h / 2), name, font=chip_face, fill=MUTED, anchor="lm")
     bottom = y + h - pad
     if p.price and (p.price_note or condition_line(p)):
-        draw_condition(draw, p, x + pad, bottom, inner, 32)
-        bottom -= 52
+        draw_condition(draw, p, x + pad, bottom, inner, note_size)
+        bottom -= round(note_size * 1.6)
     label = fmt_price(p.price) if p.price else "Указать цену"
-    size = 96 if p.price else 56
-    while size > 24 and font(size, 800).getlength(label) > inner:
+    size = price_size if p.price else round(price_size * 0.6)
+    while size > 18 and font(size, 800).getlength(label) > inner:
         size -= 2
     draw.text((x + pad, bottom), label, font=font(size, 800), fill=GREEN if p.price else WARN, anchor="ls")
     if p.price and not p.price_note and p.old_price and p.old_price > p.price:
-        old_face = font(38, 600)
+        old_face = font(old_size, 600)
         old = fmt_price(p.old_price)
-        top_old = bottom - size - 12
-        draw.text((x + pad, top_old), old, font=old_face, fill=MUTED, anchor="ls")
-        mid = top_old - 38 * .32
-        draw.line((x + pad, mid, x + pad + old_face.getlength(old), mid), fill=MUTED, width=3)
+        if old_face.getlength(old) <= inner:
+            top_old = bottom - size - round(old_size * 0.3)
+            draw.text((x + pad, top_old), old, font=old_face, fill=MUTED, anchor="ls")
+            mid = top_old - old_size * .32
+            draw.line((x + pad, mid, x + pad + old_face.getlength(old), mid), fill=MUTED, width=2 if not big else 3)
 
 
 # --- раскладка подборки ---------------------------------------------------------------------
@@ -527,6 +573,27 @@ def _rows(spec, left, top, width, height):
     return boxes
 
 
+def estimated_area(ratio: float, w: int, h: int) -> float:
+    """Оценка площади товара в плитке: лучшее из «подпись снизу» и «подпись сбоку»."""
+    pad = 0.06 * min(w, h)
+    footer = 190 if w < 400 else 210
+    stacked = contain_area(ratio, w - 2 * pad, h - footer - 2 * pad - 30)
+    text_w = max(190, w * 0.44)
+    side = contain_area(ratio, w - text_w - 2 * pad, h - 2 * pad - 30) if w - text_w >= 140 else 0
+    return max(stacked, side, 1.0)
+
+
+def best_rows(candidates, ratios, left, top, width, height):
+    """Из нескольких сеток выбирает ту, где товары в сумме крупнее (сумма логарифмов площадей)."""
+    best, best_score = None, None
+    for spec in candidates:
+        boxes = _rows(spec, left, top, width, height)
+        score = sum(math.log(estimated_area(r, w, h)) for r, (_, _, w, h) in zip(ratios, boxes))
+        if best_score is None or score > best_score + 1e-9:
+            best, best_score = boxes, score
+    return best
+
+
 def layout_boxes(ratios, mode="auto", *, top=MARGIN):
     """Плитки товаров (x, y, ширина, высота) в порядке номеров. Все внутри квадрата 1080."""
     n = len(ratios)
@@ -535,8 +602,7 @@ def layout_boxes(ratios, mode="auto", *, top=MARGIN):
     if n <= 1:
         return [(left, top, width, height)]
     if n == 2:
-        wide = sum(ratios) / 2 > 1.3
-        return _rows((1, 1) if wide else (2,), left, top, width, height)
+        return best_rows(((2,), (1, 1)), ratios, left, top, width, height)
     if n == 3:
         if mode == "alternate":
             return _rows((3,), left, top, width, height)

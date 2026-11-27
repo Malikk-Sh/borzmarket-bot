@@ -323,13 +323,25 @@ async def run(args):
                 blocks.append((value, None, False, []))
                 print(f"{value}: {p['message']}\n")
                 continue
+            has_photo = False
+            if p.image_urls and not args.html:
+                # Как в боте: фото считается полученным, только если файл скачан и декодирован.
+                try:
+                    from photos import download_jpeg
+                    with capture_events() as photo_events:
+                        photo, _ = await asyncio.wait_for(download_jpeg(p), 18)
+                    p.trace = list(p.trace) + photo_events
+                    has_photo = photo is not None
+                except (ImportError, asyncio.TimeoutError):
+                    has_photo = False
+            finish(p, has_photo)
             events = list(p.trace)
             print("\n".join(line.replace("<b>", "").replace("</b>", "") for line in
-                            report.summary(p, bool(p.image_urls), events, sku=sku_in_url(p.url))))
+                            report.summary(p, has_photo, events, sku=sku_in_url(p.url))))
             for e in events:
                 print("   · " + report.describe_event(e))
             print()
-            blocks.append((value, p, bool(p.image_urls), events))
+            blocks.append((value, p, has_photo, events))
         print("Для пересылки (без токенов и данных базы):")
         print(report.export(blocks))
     elif args.json:
