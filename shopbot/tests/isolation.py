@@ -16,6 +16,7 @@ def reset_state() -> None:
     prices._RESULT_CACHE.clear()
     wb._DETAIL_CACHE.clear()
     wb._basket_cache.clear()
+    wb._endpoint_order[:] = list(wb.DETAIL_ENDPOINTS)
     net._inflight.clear()
 
 

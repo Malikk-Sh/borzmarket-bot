@@ -37,6 +37,23 @@ class Watch:
     reference: Decimal
     photo: bytes | None
     post_url: str
+    source: str = ""  # откуда взята опорная цена: витрина, резерв или ручной ввод
+
+
+MANUAL_SOURCES = {"manual", "message", "screenshot", "memory"}
+FALLBACK_SOURCES = {"wbcon", "bhapi"}
+
+
+def source_class(source: str) -> str:
+    """Сопоставимы только цены одного класса: витрина с витриной, резерв с резервом.
+
+    Пустой источник — наблюдение из v9.1 и раньше: сравнивается как витрина, как и прежде.
+    """
+    if source in FALLBACK_SOURCES:
+        return "fallback"
+    if source in MANUAL_SOURCES:
+        return "manual"
+    return "market"
 
 
 def destination_key(value: int | str | None) -> str:
@@ -131,6 +148,9 @@ class History:
         if "wb_dest" not in columns:
             with self.conn:
                 self.conn.execute("ALTER TABLE price_watch ADD COLUMN wb_dest TEXT NOT NULL DEFAULT ''")
+        if "price_source" not in columns:
+            with self.conn:
+                self.conn.execute("ALTER TABLE price_watch ADD COLUMN price_source TEXT NOT NULL DEFAULT ''")
 
     def reserve(
         self, draft: Draft, destination: int | str, at: int,
@@ -173,17 +193,18 @@ class History:
             self.conn.execute("""
                 INSERT INTO price_watch (
                     key, owner_id, chat_id, marketplace, title, url, price_note,
-                    reference, photo, post_url, check_at, wb_dest
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reference, photo, post_url, check_at, wb_dest, price_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     owner_id = excluded.owner_id, chat_id = excluded.chat_id, title = excluded.title,
                     url = excluded.url, price_note = excluded.price_note, reference = excluded.reference,
                     last_notice = NULL, photo = excluded.photo, post_url = excluded.post_url,
-                    check_at = excluded.check_at, wb_dest = excluded.wb_dest, version = version + 1
+                    check_at = excluded.check_at, wb_dest = excluded.wb_dest,
+                    price_source = excluded.price_source, version = version + 1
             """, (
                 key, draft.owner_id, draft.chat_id, product.marketplace, product.title,
                 product.url, product.price_note, str(product.price), item.photo, receipt.url,
-                receipt.sent_at + DAY, product.wb_dest,
+                receipt.sent_at + DAY, product.wb_dest, product.price_source,
             ))
 
     def stop_attempt(self, key: str, uncertain: bool) -> None:
@@ -301,8 +322,16 @@ class History:
         product = Product(row["marketplace"], row["title"], row["url"], price_note=row["price_note"], wb_dest=row["wb_dest"])
         return Watch(
             row["key"], row["version"] + 1, row["owner_id"], row["chat_id"],
-            product, reference, row["photo"], row["post_url"],
+            product, reference, row["photo"], row["post_url"], row["price_source"],
         )
+
+    def rebase(self, watch, current) -> None:
+        """Ручная опорная цена заменяется первой ценой витрины без уведомления."""
+        with self.conn:
+            self.conn.execute("""
+                UPDATE price_watch SET reference = ?, last_notice = NULL, price_source = ?, wb_dest = ?,
+                    version = version + 1 WHERE key = ? AND version = ?
+            """, (str(current.price), current.price_source, current.wb_dest, watch.key, watch.version))
 
     def reset_wb_reference(self, watch, current):
         with self.conn:

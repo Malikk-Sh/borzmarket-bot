@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramAPIError
 
 from card import fmt_price
 from drafts import Draft, DraftItem, DraftStore
-from history import Watch, product_key
+from history import Watch, product_key, source_class
 from links import LinkError
 
 log = logging.getLogger("shopbot.monitor")
@@ -67,6 +67,13 @@ async def check_price(
     if current.marketplace == "wb" and current.wb_dest != product.wb_dest:
         if current.wb_dest:
             store.history.reset_wb_reference(watch, current)
+        return None
+
+    # Сравниваем сопоставимое: ручная цена могла включать личную скидку, резерв — другой регион.
+    reference_class, current_class = source_class(watch.source), source_class(current.price_source)
+    if reference_class != current_class:
+        if reference_class == "manual" and current_class == "market":
+            store.history.rebase(watch, current)
         return None
 
     drop = (watch.reference - current.price) * 100 / watch.reference

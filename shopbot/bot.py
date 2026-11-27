@@ -50,6 +50,7 @@ from prices import fetch_product, market_url, saved_markup, supplement_products
 import bhapi
 import report
 import state
+import tg_preview
 from storefront import sku_in_url
 from ozon import fetch_ozon
 from monitor import fetch_result, price_threshold, run_price_watch
@@ -431,6 +432,52 @@ async def retrieve_links(links, slots, *, fresh=False):
         responses[i] = (DraftItem(settle(product, photo), photo, index),
                         " ".join(filter(None, (product.import_note, extra))))
     return responses
+
+
+def has_link_text(message) -> bool:
+    """Превью строится только для сообщения, где была ссылка, а не одно число артикула."""
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
+    if not isinstance(text, str):
+        return False
+    try:
+        return bool(extract_urls(message_references(message)))
+    except (TypeError, AttributeError):
+        return False
+
+
+async def apply_preview(item: DraftItem, message: Message, link: tuple[str, httpx.URL]) -> DraftItem:
+    """Название и фото из превью, которое Telegram построил для этой же ссылки (если модуль включён)."""
+    product = item.product
+    if not tg_preview.enabled() or not (product.provisional_title or not product.title.strip() or not item.photo):
+        return item
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, int):
+        return item
+    with capture_events() as events:
+        preview = await tg_preview.fetch(message_id)
+        same = False
+        if preview is not None:
+            try:
+                market, url = product_link(preview.url)
+                same = market == link[0] and (str(url) == str(link[1]) or (
+                    sku_in_url(str(url)) and sku_in_url(str(url)) == sku_in_url(product.url)))
+            except LinkError:
+                same = False
+            if not same:
+                event("tg.preview", "empty", detail="превью другой ссылки, не используется")
+    product = replace(product, trace=list(product.trace) + events)
+    photo, index = item.photo, item.photo_index
+    if preview is not None and same:
+        if (product.provisional_title or not product.title.strip()) and preview.title:
+            product = replace(product, title=preview.title, title_source="tg.preview")
+        if not photo and preview.photo:
+            try:
+                photo = await asyncio.to_thread(convert_to_jpeg, preview.photo)
+                index = None
+                product = replace(product, photo_source="tg.preview")
+            except (OSError, ValueError, Image.DecompressionBombError):
+                photo = None
+    return DraftItem(settle(product, photo), photo, index)
 
 
 async def clear_view(bot: Bot, chat_id: int, message_id: int | None) -> None:
@@ -1135,6 +1182,7 @@ async def diagnose(value, slots):
     if warning and item.missing:
         tail.append("Причина · " + html.escape(short_text(warning, 300)))
     tail.append(settings[0 if market == "wb" else 1] + " · " + html.escape(net.describe()))
+    tail.append(html.escape(tg_preview.describe()))
     export = report.export([(value, p, has_photo, events)]).splitlines()
     keep = len(log_lines)
     while True:
@@ -1357,13 +1405,13 @@ async def supplement_message(item: DraftItem, message: Message, bot: Bot, *, qui
     if quote is not None:
         if quick or product.price is None or product.price_source in ("wbcon", "bhapi", "memory"):
             if product.price is not None and product.price != quote.price:
-                alternatives["price"] = {"value": str(product.price), "label": report.PRICE_SOURCES.get(
+                alternatives["price"] = {"value": plain_amount(product.price), "label": report.PRICE_SOURCES.get(
                     product.price_source, product.price_source or "витрины"), "source": product.price_source}
             product = replace(quote, price_at=int(time.time()), trace=product.trace, gaps=product.gaps,
                               title_source=product.title_source, reference_note=product.reference_note)
             used = True
         elif quote.price != product.price:
-            alternatives["price"] = {"value": str(quote.price), "label": "вашего сообщения", "source": "message"}
+            alternatives["price"] = {"value": plain_amount(quote.price), "label": "вашего сообщения", "source": "message"}
     if title:
         if quick or not product.title or product.provisional_title:
             if product.title and not product.provisional_title and product.title != title:
@@ -1374,7 +1422,7 @@ async def supplement_message(item: DraftItem, message: Message, bot: Bot, *, qui
         elif title != product.title:
             alternatives["title"] = {"value": title, "label": "вашего сообщения", "source": "message"}
     for name in ("price", "title"):
-        current = str(product.price) if name == "price" else product.title
+        current = plain_amount(product.price) if name == "price" else product.title
         if name in alternatives and alternatives[name]["value"] == current:
             alternatives.pop(name)
     if alternatives != (product.alternatives or {}):
@@ -1386,6 +1434,14 @@ async def supplement_message(item: DraftItem, message: Message, bot: Bot, *, qui
     revised = DraftItem(product, photo or item.photo, None if photo else item.photo_index)
     revised.product.gaps = field_gaps(revised.product, revised.photo is not None, revised.product.trace)
     return revised, used
+
+
+def plain_amount(value) -> str:
+    """Сумма для хранения: 1299 или 1299.9, без хвостовых нулей и экспоненты."""
+    if value is None:
+        return ""
+    text = format(Decimal(value).quantize(Decimal("0.01")), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 TITLE_LABELS = {"ozon.page": "Ozon", "wb.detail": "WB", "wb.basket": "WB", "wbcon": "WBCON", "bhapi": "BHAPI",
@@ -1522,6 +1578,8 @@ async def collect_links(
         return
 
     supplied = False
+    if len(links) == 1 and items and tg_preview.enabled() and has_link_text(message):
+        items[0] = await apply_preview(items[0], message, links[0])
     if len(links) == 1 and hints:
         # A share sheet or a forwarded photo can complete a single draft in one message.
         try:
@@ -1776,7 +1834,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot, store: DraftStore, fetch_slot
             return
         rest = {k: v for k, v in product.alternatives.items() if k != extra[0]}
         if extra[0] == "price":
-            previous = {"value": str(product.price), "label": report.PRICE_SOURCES.get(product.price_source, "черновика"),
+            previous = {"value": plain_amount(product.price), "label": report.PRICE_SOURCES.get(product.price_source, "черновика"),
                         "source": product.price_source} if product.price is not None else None
             chosen = manual_price(product, Decimal(option["value"]), source=option.get("source") or "manual")
         else:
@@ -1881,6 +1939,7 @@ async def main() -> None:
 
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     store = DraftStore(DB_PATH)
+    state.configure(DB_PATH)  # паузы источников и последние поля переживают перезапуск
     dp = Dispatcher()
     dp.include_router(router)
     workers: list[asyncio.Task[None]] = []
@@ -1896,7 +1955,8 @@ async def main() -> None:
         workers.append(asyncio.create_task(run_queue(bot, store)))
         if monitor:
             workers.append(asyncio.create_task(
-                run_price_watch(bot, store, ADMIN_IDS, slots, partial(retrieve_item, allow_paid=False), show_preview)
+                run_price_watch(bot, store, ADMIN_IDS, slots, partial(retrieve_item, allow_paid=False, background=True),
+                                show_preview)
             ))
         await dp.start_polling(bot, close_bot_session=False, store=store, fetch_slots=slots)
     finally:
@@ -1905,8 +1965,10 @@ async def main() -> None:
         await asyncio.gather(*workers, return_exceptions=True)
         if click_runner is not None:
             await click_runner.cleanup()
+        await tg_preview.close()
         await bot.session.close()
         store.close()
+        state.configure(None)
 
 
 if __name__ == "__main__":
