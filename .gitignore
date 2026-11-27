@@ -1,0 +1,17 @@
+# окружения и кэши
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# данные и секреты владельца никогда не коммитятся
+.env
+**/.env
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.session
+*.session-journal
+*.log
+# временная сборка
+build/

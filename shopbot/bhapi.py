@@ -1,4 +1,10 @@
-"""Дополнительный источник карточек по подписке администратора."""
+"""Дополнительный источник карточек по подписке администратора.
+
+Документация: https://bhapi.ru/docs/ozon/v2 и https://bhapi.ru/docs/wb (прочитано 27.11.2026).
+Один синхронный запрос на товар, ключ в заголовке X-API-Token. Каждый успешный вызов
+расходует единицу квоты (бесплатно — 30 вызовов на 30 дней). data_freshness сообщает
+возраст кэша сервиса: он становится временем цены в черновике.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +15,9 @@ from dataclasses import replace
 import httpx
 
 from card import ParseError, Product, parse_price
-from diagnostics import step
-from storefront import as_list, images, in_rubles, sku_in_url
+from diagnostics import event, step
+import state
+from storefront import as_list, images, in_rubles, retry_after, sku_in_url
 
 API = "https://bhapi.ru"
 _cooldown = {"wb": 0.0, "ozon": 0.0}
@@ -20,18 +27,32 @@ def token(market):
     return os.getenv(f"BHAPI_{market.upper()}_TOKEN", "").strip()
 
 
+def freshness(row) -> int | None:
+    """Когда сервис собрал карточку: assembled_at или «сейчас минус возраст кэша»."""
+    fresh = row.get("data_freshness") if isinstance(row, dict) else None
+    if not isinstance(fresh, dict):
+        return None
+    age = fresh.get("cache_age_seconds")
+    if isinstance(age, (int, float)) and not isinstance(age, bool) and 0 <= age < 30 * 86400:
+        return int(time.time() - age)
+    return None
+
+
 def parse(product, payload):
     market = product.marketplace
     sku = sku_in_url(product.url)
     if not isinstance(payload, dict) or payload.get("status") != "ok":
         raise ParseError("BHAPI вернул ответ без карточки.")
     row = payload.get("data")
+    outer = row
     if market == "wb" and isinstance(row, dict):
         row = row.get("data")
     if not isinstance(row, dict) or str(row.get("item_id" if market == "wb" else "sku")) != sku:
         raise ParseError("BHAPI не подтвердил запрошенный артикул.")
     title = row.get("title")
-    base = Product(market, title.strip() if isinstance(title, str) else "", product.url)
+    base = Product(market, title.strip() if isinstance(title, str) else "", product.url,
+                   title_source="bhapi" if isinstance(title, str) and title.strip() else "")
+    observed = freshness(row) or freshness(outer) or int(time.time())
     if market == "ozon":
         base.image_urls = images(base, as_list(row.get("images")))
         prices = row.get("prices")
@@ -72,7 +93,7 @@ def parse(product, payload):
     if amount is None:
         return base
     return replace(base, price=amount, old_price=old if old and old > amount else None,
-                   price_note=note, price_source="bhapi")
+                   price_note=note, price_source="bhapi", price_at=observed)
 
 
 async def lookup(product):
@@ -80,8 +101,12 @@ async def lookup(product):
     sku = sku_in_url(product.url)
     if not sku or not token(market):
         raise ParseError("Для BHAPI нужны артикул и ключ площадки.")
-    if time.monotonic() < _cooldown[market]:
-        raise ParseError("Пауза BHAPI после ограничения запросов.")
+    pause = state.STATE.blocked("bhapi." + market)
+    if time.monotonic() < _cooldown[market] or pause:
+        when = f" Повторите {state.wait_text(pause[0])}." if pause else ""
+        event("bhapi." + market, "skipped", retry_at=pause[0] if pause else None, detail="пауза после лимита")
+        raise ParseError("Пауза BHAPI после ограничения запросов." + when)
+    started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(32, connect=6), follow_redirects=False,
                                      headers={"X-API-Token": token(market)}) as client:
@@ -92,15 +117,28 @@ async def lookup(product):
                 request = client.get(API + "/wb/api/v1/item/by-url", params={"url": url})
             response = await asyncio.wait_for(request, 35)
     except (asyncio.TimeoutError, httpx.HTTPError, ImportError, ValueError) as error:
+        event("bhapi." + market, "timeout" if isinstance(error, (asyncio.TimeoutError, httpx.TimeoutException)) else "error",
+              ms=int((time.perf_counter() - started) * 1000), detail=type(error).__name__)
         raise ParseError(f"BHAPI · {type(error).__name__}") from error
+    ms = int((time.perf_counter() - started) * 1000)
     step("BHAPI", f"HTTP {response.status_code}")
     if response.status_code == 429:
-        delay = response.headers.get("Retry-After", "")
-        seconds = int(delay) if delay.isascii() and delay.isdigit() and len(delay) <= 6 else 60
+        wait = retry_after(response.headers.get("Retry-After"))
+        seconds = int(wait) if wait is not None and wait < 86400 else 60
         _cooldown[market] = time.monotonic() + max(1, seconds)
+        state.STATE.block("bhapi." + market, time.time() + max(1, seconds), "HTTP 429")
+        event("bhapi." + market, "limit", http=429, ms=ms, retry_at=time.time() + max(1, seconds))
     if response.status_code != 200:
+        if response.status_code != 429:
+            event("bhapi." + market, "error", http=response.status_code, ms=ms)
         raise ParseError(f"BHAPI · HTTP {response.status_code}")
     try:
-        return parse(product, response.json())
+        result = parse(product, response.json())
     except ValueError as error:
+        event("bhapi." + market, "error", http=200, ms=ms, detail="ответ без JSON")
         raise ParseError("BHAPI вернул ответ без JSON.") from error
+    except ParseError as error:
+        event("bhapi." + market, "empty", http=200, ms=ms, detail=str(error))
+        raise
+    event("bhapi." + market, "ok", http=200, ms=ms, detail="платный вызов")
+    return result

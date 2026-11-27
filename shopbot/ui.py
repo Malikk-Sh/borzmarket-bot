@@ -64,7 +64,7 @@ def home_text(drafts: int, queued: int, next_due: str, today: int) -> str:
 
 
 WELCOME = (
-    "<b>🛍 BorzMarket v9.1</b> · редактор канала\n"
+    "<b>🛍 BorzMarket v10.0</b> · редактор канала\n"
     "Внизу — быстрые кнопки. Полная панель открывается кнопкой «🏠 Меню»."
 )
 
@@ -77,23 +77,69 @@ HELP_TEXT = (
     "<b>Подборка</b>\n"
     "От 2 до 6 ссылок одним сообщением. Номер под фото совпадает с кнопкой под постом.\n\n"
     "<b>Если данные не загрузились</b>\n"
-    "• «↻ Загрузить недостающее» повторяет запрос.\n"
+    "Под черновиком написано, чего не хватает, почему и что сделать. Если не хватает одного поля, "
+    "просто пришлите его следующим сообщением: цену числом, название текстом или фото.\n"
+    "• «↻ Загрузить недостающее» повторяет запрос, если источник не на паузе.\n"
     "• «⚡ Быстрый ввод» принимает строку <code>Термос 500 мл — 1 299 ₽</code>.\n"
-    "• «🩺 Диагностика» показывает, на каком шаге остановилась загрузка.\n\n"
+    "• Фото с подписью <code>ozon:1526882900</code> и <code>Термос — 1 299 ₽</code> сразу даёт черновик.\n"
+    "• «🩺 Диагностика» показывает каждый источник и строку для пересылки без токенов.\n\n"
     "<b>Команды</b>\n"
     "/drafts · /queue · /history · /stats · /diag · /cancel"
 )
 
 
+FIELD_KEYS = {"название": "title", "цена": "price", "фото": "photo"}
+
+
 def status_notes(draft_items, *, ready: bool, many: bool) -> str:
-    """Строка состояния под превью: что осталось заполнить или что всё готово."""
+    """Строка состояния под превью: что осталось заполнить, почему и что сделать сейчас."""
+    from report import next_action
     missing = []
     for index, item in enumerate(draft_items, 1):
-        if item.missing:
-            prefix = f"{index}. " if many else ""
-            missing.append(prefix + ", ".join(item.missing))
+        if not item.missing:
+            continue
+        gaps = item.product.gaps or {}
+        if many:
+            missing.append(f"{index}. " + ", ".join(item.missing))
+            continue
+        for label in item.missing:
+            reason = gaps.get(FIELD_KEYS[label], "")
+            missing.append(label + (f" — {short_text(reason, 110)}" if reason else ""))
     if missing:
-        return "\n\n✏️ <b>Осталось заполнить</b>\n" + "\n".join(html.escape(line) for line in missing)
+        text = "\n\n✏️ <b>Осталось заполнить</b>\n" + "\n".join("• " + html.escape(line) for line in missing)
+        if many:
+            text += "\n👉 Нажмите «↻ Дозагрузить пустые» или номер с ⚠️, чтобы дополнить вручную."
+        else:
+            item = draft_items[0]
+            if item.product.reference_note:
+                text += "\nℹ️ " + html.escape(short_text(item.product.reference_note, 160))
+            text += "\n👉 " + html.escape(next_action(item.product, item.photo is not None, item.product.trace))
+        return text
     if ready:
         return "\n\n✅ <b>Готово к публикации</b>" + (" · нажмите номер, чтобы изменить товар" if many else "")
     return ""
+
+
+def alternatives_note(product) -> str:
+    """Противоречивые значения показываются как варианты, а не теряются молча."""
+    lines = []
+    alt = product.alternatives or {}
+    if "price" in alt:
+        lines.append(f"Цена из {alt['price'].get('label', 'другого источника')}: {fmt_price(Decimal(alt['price']['value']))}")
+    if "title" in alt:
+        lines.append(f"Название из {alt['title'].get('label', 'другого источника')}: «{short_text(alt['title']['value'], 60)}»")
+    return "\n".join(html.escape(line) for line in lines)
+
+
+def slot_label(timestamp: int, now: int | None = None) -> str:
+    """«Сегодня 16:00», «Завтра 10:00» или «28.11 10:00» по Москве."""
+    import time
+    from datetime import datetime, timedelta, timezone
+    zone = timezone(timedelta(hours=3))
+    moment = datetime.fromtimestamp(timestamp, zone)
+    today = datetime.fromtimestamp(now if now is not None else time.time(), zone).date()
+    if moment.date() == today:
+        return "Сегодня " + moment.strftime("%H:%M")
+    if moment.date() == today + timedelta(days=1):
+        return "Завтра " + moment.strftime("%H:%M")
+    return moment.strftime("%d.%m %H:%M")

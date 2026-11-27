@@ -100,7 +100,9 @@ class PriceTests(CleanState, unittest.IsolatedAsyncioTestCase):
         p = Product("wb", "Фотоаппарат", WB)
         with patch.object(prices, "fetch_wb", AsyncMock(return_value=p)), \
              patch.object(wbcon, "lookup_batch", AsyncMock()) as secondary:
-            self.assertIs(await prices.fetch_product(WB, direct_only=True), p)
+            got = await prices.fetch_product(WB, direct_only=True)
+            # v10 отдаёт копию: общий результат параллельных запросов не должен меняться у соседа.
+            self.assertEqual((got.title, got.url, got.price), (p.title, p.url, p.price))
             secondary.assert_not_awaited()
 
     async def test_telegram_import_handles_secondary_failure(self):

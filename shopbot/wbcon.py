@@ -1,4 +1,10 @@
-"""Резервный источник WB и ручная проверка Ozon через публичные методы WBCON."""
+"""Резервный источник WB и ручная проверка Ozon через публичные методы WBCON.
+
+Лимиты из описания OpenAPI (https://prices.wbcon.su/openapi.json, https://oz.wbcon.su/openapi.json,
+прочитано 27.11.2026): демо — 2 запроса в минуту на метод, до 5 артикулов WB в запросе через «;».
+WB: salePriceU — «цена после скидки и СПП» в копейках, без WB Кошелька, без региона и размера.
+Ozon (сервис «Ozon-калькулятор»): name, imageUrl, price по артикулу.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -11,14 +17,16 @@ from decimal import Decimal
 
 import httpx
 
-from diagnostics import step
+from diagnostics import event, step
 from card import ParseError, Product, parse_price
-from storefront import images, sku_in_url
+import state
+from storefront import images, retry_after, sku_in_url
 
+DEMO_PER_MINUTE = 2
+DEMO_BATCH = 5
 # У каждого демо-метода свой лимит. Проверка и резервирование выполняются до первого await.
 _recent = {"wb": deque(), "ozon": deque()}
-_blocked_until = {"wb": 0.0, "ozon": 0.0}
-
+_blocked_until = {"wb": 0.0, "ozon": 0.0}  # совместимость: зеркало паузы из state
 
 # Один процесс бота. Храним успешные ответы, чтобы открытие карточки после /diag не тратило запрос.
 _cache = OrderedDict()
@@ -38,63 +46,94 @@ def available(product: Product) -> bool:
             and (os.getenv("WB_DEST") or "-1257786") == "-1257786")
 
 
-def reserve(market):
+def paused(market: str) -> tuple[float, str] | None:
+    """Пауза после 429 (переживает перезапуск, если подключена база)."""
+    value = state.STATE.blocked("wbcon." + market)
+    if value is None and _blocked_until[market] > time.time():
+        value = (_blocked_until[market], "лимит запросов")
+    return value
+
+
+def reserve(market, *, background: bool = False):
     now = time.monotonic()
     window = _recent[market]
-    while window and window[0] <= now-60:
+    while window and window[0] <= now - 60:
         window.popleft()
-    deadline = max(_blocked_until[market], window[0]+60 if len(window) >= 2 else 0)
+    pause = paused(market)
+    if pause:
+        raise ParseError(f"WBCON на паузе после лимита. Повторите {state.wait_text(pause[0])}.")
+    if background and window:
+        # Фоновые проверки не отнимают квоту у администратора: только при пустом окне.
+        raise ParseError("WBCON занят интерактивными запросами, фоновая проверка отложена.")
+    deadline = window[0] + 60 if len(window) >= DEMO_PER_MINUTE else 0
     if deadline > now:
-        raise ParseError(f"Лимит WBCON. Попробуйте через {math.ceil(deadline-now)} с.")
+        raise ParseError(f"Лимит WBCON. Попробуйте через {math.ceil(deadline - now)} с.")
     window.append(now)
 
 
 def from_payload(product, sku, payload):
     result = Product(product.marketplace, "", product.url)
     if product.marketplace == "wb":
-        rows = payload if isinstance(payload,list) else []
-        rows = [r for r in rows if isinstance(r,dict) and str(r.get("id")) == sku]
+        rows = payload if isinstance(payload, list) else []
+        rows = [r for r in rows if isinstance(r, dict) and str(r.get("id")) == sku]
         if len(rows) == 1:
-            value = str(rows[0].get("salePriceU",""))
+            value = str(rows[0].get("salePriceU", ""))
             if value.isascii() and value.isdigit() and len(value) <= 16 and int(value) > 0:
                 result.price = Decimal(value).scaleb(-2)
-    elif isinstance(payload,dict) and str(payload.get("article")) == sku:
+    elif isinstance(payload, dict) and str(payload.get("article")) == sku:
         title = payload.get("name")
-        result.title = title.strip() if isinstance(title,str) else ""
-        result.image_urls = images(product,[payload.get("imageUrl")])
+        result.title = title.strip() if isinstance(title, str) else ""
+        result.image_urls = images(product, [payload.get("imageUrl")])
         result.price = parse_price(payload.get("price"))
+        if result.title:
+            result.title_source = "wbcon"
     if result.price:
         result.price_note = "по данным WBCON"
         result.price_source = "wbcon"
+        result.price_at = int(time.time())
     return result
 
 
-async def request_prices(market, articles):
-    reserve(market)
+async def request_prices(market, articles, *, background: bool = False):
+    reserve(market, background=background)
+    started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
             if market == "wb":
-                r = await client.get("https://prices.wbcon.su/get",params={"articles":";".join(articles)})
+                r = await client.get("https://prices.wbcon.su/get", params={"articles": ";".join(articles)})
             else:
-                r = await client.post("https://oz.wbcon.su/put",json={"article":int(articles[0])})
+                r = await client.post("https://oz.wbcon.su/put", json={"article": int(articles[0])})
     except (httpx.HTTPError, ImportError, ValueError) as error:
+        outcome = "timeout" if isinstance(error, httpx.TimeoutException) else "error"
+        event("wbcon." + market, outcome, ms=int((time.perf_counter() - started) * 1000),
+              detail=type(error).__name__)
         raise ParseError("WBCON сейчас недоступен. Попробуйте позже.") from error
-    step("WBCON " + market.upper(), f"HTTP {r.status_code}")
+    ms = int((time.perf_counter() - started) * 1000)
     if r.status_code == 429:
-        retry = r.headers.get("Retry-After","")
-        seconds = max(60,int(retry)) if retry.isascii() and retry.isdigit() and len(retry) <= 6 else 60
-        _blocked_until[market] = time.monotonic()+seconds
-        raise ParseError(f"WBCON достиг лимита запросов. Повторите через {seconds} с.")
+        wait = retry_after(r.headers.get("Retry-After"))
+        seconds = max(60, math.ceil(wait)) if wait is not None and wait < 86400 else 60
+        until = time.time() + seconds
+        step("WBCON " + market.upper(), f"HTTP 429 · повтор {state.wait_text(until)}")
+        _blocked_until[market] = until
+        state.STATE.block("wbcon." + market, until, "HTTP 429")
+        event("wbcon." + market, "limit", http=429, ms=ms, retry_at=until)
+        raise ParseError(f"WBCON достиг лимита запросов. Повторите {state.wait_text(until)}.")
+    if r.status_code != 429:
+        step("WBCON " + market.upper(), f"HTTP {r.status_code} · {ms / 1000:.1f} с".replace(".", ","))
     if r.status_code != 200:
+        event("wbcon." + market, "error", http=r.status_code, ms=ms)
         raise ParseError(f"WBCON не вернул карточку (HTTP {r.status_code}).")
     try:
-        return r.json()
+        payload = r.json()
     except ValueError as error:
+        event("wbcon." + market, "error", http=200, ms=ms, detail="ответ без JSON")
         raise ParseError("WBCON вернул ответ без данных товара.") from error
+    event("wbcon." + market, "ok", http=200, ms=ms, detail=f"артикулов {len(articles)}")
+    return payload
 
 
-async def lookup_batch(products):
-    if not products or len(products) > 5 or not all(available(p) for p in products):
+async def lookup_batch(products, *, background: bool = False):
+    if not products or len(products) > DEMO_BATCH or not all(available(p) for p in products):
         raise ParseError("Проверка WBCON требует от одного до пяти подходящих артикулов.")
     market = products[0].marketplace
     if any(p.marketplace != market for p in products) or (market == "ozon" and len(products) != 1):
@@ -109,11 +148,12 @@ async def lookup_batch(products):
             if hit is not None and now - hit[0] < _cache_ttl:
                 found[sku] = hit[1]
                 step("WBCON " + market.upper(), f"артикул {sku} · ответ {int(now-hit[0])} с назад")
+                event("wbcon." + market, "cached", detail=f"ответ {int(now - hit[0])} с назад")
             else:
                 missing[sku] = product
         if missing:
             try:
-                payload = await request_prices(market, list(missing))
+                payload = await request_prices(market, list(missing), **({"background": True} if background else {}))
             except ParseError as error:
                 if not found:
                     raise
@@ -132,7 +172,7 @@ async def lookup_batch(products):
                 for sku, p in zip(skus, products)]
 
 
-async def lookup(product):
+async def lookup(product, *, background: bool = False):
     if not available(product):
         raise ParseError("WBCON нужен прямой артикул. Для WB доступна общая цена без выбранного размера и ПВЗ.")
-    return (await lookup_batch([product]))[0]
+    return (await lookup_batch([product], background=background))[0]

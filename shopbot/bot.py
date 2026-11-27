@@ -42,10 +42,15 @@ from drafts import MAX_ITEMS, Draft, DraftItem, DraftStore
 from links import (IMAGE_DOMAINS, LinkError, article_url, extract_urls, get_allowed,
                    normalize_references, parse_article, product_link)
 import net
-from diagnostics import capture, step
+from diagnostics import capture, capture_events, event, step
+from report import field_gaps
 from screenshot_price import recognize
 from hints import fields as message_fields
 from prices import fetch_product, market_url, saved_markup, supplement_products
+import bhapi
+import report
+import state
+from storefront import sku_in_url
 from ozon import fetch_ozon
 from monitor import fetch_result, price_threshold, run_price_watch
 from outbound import refresh_reaction, start_clicks
@@ -103,9 +108,11 @@ class Input:
     index: int = 0
     choices: tuple[Decimal, ...] = ()
     nonce: str = field(default_factory=lambda: secrets.token_hex(4))
+    auto: bool = False  # открыт ботом для единственного недостающего поля, без кнопки
 
 
 INPUTS: dict[tuple[int, int], Input] = {}
+REFRESHING: set[str] = set()  # черновики, которые сейчас дозагружаются: второе нажатие не шлёт запросы
 
 
 def is_admin(user_id: int) -> bool:
@@ -166,9 +173,17 @@ def item_buttons(draft: Draft, index: int, *, more: bool = False) -> list[list[I
             rows.append([action("✂️ Сократить название", "shorten", draft, index)])
         rows.append([action("‹ К товару", "item", draft, index)])
         return rows
+    if product.provisional_title:
+        rows.append([action("✅ Название верно", "titleok", draft, index),
+                     action("✏️ Своё название", "edit", draft, "title", index)])
+    for name, label in (("price", "💰 Взять цену"), ("title", "✏️ Взять название")):
+        option = (product.alternatives or {}).get(name)
+        if option:
+            value = fmt_price(Decimal(option["value"])) if name == "price" else short_text(option["value"], 18)
+            rows.append([action(f"{label} {value}", "alt", draft, name, index)])
     if item.missing:
-        rows.append([action("↻ Загрузить недостающее", "retry", draft, index)])
-        rows.append([action("⚡ Быстрый ввод", "edit", draft, "quick", index)])
+        rows.append([action("↻ Загрузить недостающее", "retry", draft, index),
+                     action("⚡ Быстрый ввод", "edit", draft, "quick", index)])
     if wbcon.available(product) and (not product.price or (product.marketplace == "ozon" and item.missing)):
         rows.append([action("🌐 Проверить через WBCON", "external", draft, index)])
     rows.append([action("💰 " + ("Ввести цену" if not product.price else "Цена"), "edit", draft, "price", index),
@@ -183,6 +198,8 @@ def item_buttons(draft: Draft, index: int, *, more: bool = False) -> list[list[I
     rows.append([action("🛠 Ещё", "more", draft, index)])
     if len(draft.items) > 1:
         order = []
+        if index > 1:
+            order.append(action("⏫ Первым", "first", draft, index))
         if index:
             order.append(action("↑ Раньше", "up", draft, index))
         if index + 1 < len(draft.items):
@@ -192,7 +209,7 @@ def item_buttons(draft: Draft, index: int, *, more: bool = False) -> list[list[I
     return rows
 
 
-def preview_keyboard(draft: Draft) -> InlineKeyboardMarkup:
+def preview_keyboard(draft: Draft, slot: int | None = None) -> InlineKeyboardMarkup:
     if draft.state == "queued":
         rows = [
             [action("🚀 В канал сейчас", "post", draft)],
@@ -207,12 +224,20 @@ def preview_keyboard(draft: Draft) -> InlineKeyboardMarkup:
         rows = []
         many = len(draft.items) > 1
         if draft.ready:
-            rows.append([action("🚀 Опубликовать", "post", draft), action("🕓 Запланировать", "time", draft)])
+            first = [action("🚀 Опубликовать", "post", draft)]
+            if slot is not None:
+                # Самый частый путь «в ближайший слот» — одной кнопкой, время видно заранее.
+                first.append(action("📅 " + ui.slot_label(slot), "slot", draft))
+            else:
+                first.append(action("🕓 Запланировать", "time", draft))
+            rows.append(first)
         if many:
             chips = [action(f"✏️ {i + 1}" + (" ⚠️" if item.missing else ""), "item", draft, i)
                      for i, item in enumerate(draft.items)]
             per_row = 4 if len(chips) <= 4 else 3
             rows.extend(chips[start:start + per_row] for start in range(0, len(chips), per_row))
+            if not draft.ready:
+                rows.append([action("↻ Дозагрузить пустые", "refill", draft)])
         elif draft.ready:
             rows.append([action("✏️ Изменить", "item", draft, 0)])
         else:
@@ -223,6 +248,8 @@ def preview_keyboard(draft: Draft) -> InlineKeyboardMarkup:
         if many:
             manage.append(action("🧮 Цены", "edit", draft, "prices", 0))
         manage.append(action("🎨 Стиль", "design", draft))
+        if draft.ready and slot is not None:
+            manage.append(action("🕓 Время", "time", draft))
         if not many and draft.ready:
             rows[-1].extend(manage)
         else:
@@ -241,9 +268,24 @@ def preview_text(draft: Draft) -> str:
         notes = "\n\n⚠️ " + html.escape(draft.error or SEND_UNKNOWN)
     else:
         notes = ui.status_notes(draft.items, ready=draft.state == "draft" and draft.ready, many=len(draft.items) > 1)
+        if len(draft.items) == 1 and (alt := ui.alternatives_note(draft.items[0].product)):
+            notes += "\n🔀 " + alt
         if draft.error:
             notes += "\n\n⚠️ " + html.escape(short_text(draft.error, 135))
     return post_caption(draft, reserve=caption_units(notes)) + notes
+
+
+def single_gap(draft: Draft) -> str | None:
+    """Поле, которое можно прислать следующим сообщением без нажатия кнопки."""
+    if draft.state != "draft" or len(draft.items) != 1:
+        return None
+    item = draft.items[0]
+    if item.product.provisional_title or item.product.price_unavailable:
+        return None
+    missing = item.missing
+    if len(missing) != 1:
+        return None
+    return {"цена": "price", "название": "title", "фото": "photo"}[missing[0]]
 
 
 def convert_to_jpeg(raw: bytes) -> bytes:
@@ -264,6 +306,7 @@ def image_variants(url: str) -> list[str]:
 async def download_jpeg(
     product: Product, indexes: tuple[int, ...] | None = None
 ) -> tuple[bytes | None, int | None]:
+    """Скачивает и декодирует первое доступное фото. Ссылка в галерее ещё не значит, что файл есть."""
     if indexes is None:
         indexes = tuple(range(len(product.image_urls)))
     if not indexes:
@@ -275,56 +318,81 @@ async def download_jpeg(
                 value = product.image_urls[index]
                 url = "https:" + value if value.startswith("//") else value
                 for variant in image_variants(url):
+                    started = time.perf_counter()
                     try:
                         response = await get_allowed(client, variant, IMAGE_DOMAINS[product.marketplace])
                         step(f"Фото {index+1}", f"HTTP {response.status_code}")
+                        ms = int((time.perf_counter() - started) * 1000)
                         if response.status_code == 200 and response.content:
-                            return await asyncio.to_thread(convert_to_jpeg, response.content), index
+                            jpeg = await asyncio.to_thread(convert_to_jpeg, response.content)
+                            event("photo", "ok", http=200, ms=ms, detail=f"фото {index + 1}")
+                            return jpeg, index
+                        event("photo", "error", http=response.status_code, ms=ms, detail=f"фото {index + 1}")
                     except (LinkError, httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError) as error:
                         step(f"Фото {index+1}", type(error).__name__)
+                        event("photo", "error", ms=int((time.perf_counter() - started) * 1000),
+                              detail=f"фото {index + 1}: {type(error).__name__}")
                         continue
     except (ImportError, ValueError, httpx.HTTPError) as error:
         log.warning("Не удалось открыть соединение для фото (%s)", type(error).__name__)
     return None, None
 
 
+def settle(product: Product, photo: bytes | None, source: str = "market") -> Product:
+    """Фиксирует источник фото и причины пропусков по полям после скачивания файла."""
+    if photo is not None and not product.photo_source:
+        product.photo_source = source
+    product.gaps = field_gaps(product, photo is not None, product.trace)
+    return product
+
+
 async def retrieve_item(
     market: str, url: str, slots: asyncio.Semaphore, *, need_photo: bool = True, direct_only: bool = False,
-    allow_paid: bool = True, fresh: bool = False,
+    allow_paid: bool = True, fresh: bool = False, background: bool = False,
 ) -> tuple[DraftItem, str]:
     async with slots:
-        try:
-            product = await asyncio.wait_for(
-                fetch_product(url, direct_only=direct_only, allow_paid=allow_paid, fresh=fresh),
-                timeout=110 if not direct_only else 55,
-            )
-        except LinkError:
-            raise
-        except ParseError as error:
-            return DraftItem(Product(market, "", url)), str(error)
-        except asyncio.TimeoutError:
-            return DraftItem(Product(market, "", url)), "Витрина ответила слишком поздно."
-        except Exception as error:
-            log.warning("Не удалось разобрать ответ %s (%s)", market, type(error).__name__)
-            return DraftItem(Product(market, "", url)), "Витрина не отдала данные в ожидаемом формате."
+        with capture_events() as failed_events:
+            try:
+                product = await asyncio.wait_for(
+                    fetch_product(url, direct_only=direct_only, allow_paid=allow_paid, fresh=fresh, background=background),
+                    timeout=110 if not direct_only else 55,
+                )
+                failure = None
+            except LinkError:
+                raise
+            except ParseError as error:
+                failure = str(error)
+            except asyncio.TimeoutError:
+                failure = "Витрина ответила слишком поздно."
+            except Exception as error:
+                log.warning("Не удалось разобрать ответ %s (%s)", market, type(error).__name__)
+                failure = "Витрина не отдала данные в ожидаемом формате."
+        if failure is not None:
+            empty = Product(market, "", url, import_note=failure)
+            empty.trace = list(failed_events)
+            empty.gaps = field_gaps(empty, False, empty.trace)
+            return DraftItem(empty), failure
 
         if not need_photo:
             return DraftItem(product), product.import_note
-        try:
-            photo, index = await asyncio.wait_for(download_jpeg(product), timeout=18)
-        except asyncio.TimeoutError:
-            photo, index = None, None
+        with capture_events() as photo_events:
+            try:
+                photo, index = await asyncio.wait_for(download_jpeg(product), timeout=18)
+            except asyncio.TimeoutError:
+                photo, index = None, None
+                event("photo", "timeout", detail="18 с")
+        product.trace = list(product.trace) + photo_events
         note = product.import_note
         if product.image_urls and not photo:
             note = (note + " Фото не удалось скачать.").strip()
-        return DraftItem(product, photo, index), note
+        return DraftItem(settle(product, photo), photo, index), note
 
 
 async def retrieve_links(links, slots, *, fresh=False):
     wb_links = [str(url) for market, url in links if market == "wb"]
     if len(wb_links) > 1:
         async with slots:
-            await prefetch_many(wb_links)  # одна заявка вместо шести
+            await prefetch_many(wb_links, fresh=fresh)  # одна заявка вместо шести
     responses = await asyncio.gather(
         *(retrieve_item(market, str(url), slots, direct_only=True, **({"fresh": True} if fresh else {}))
           for market, url in links),
@@ -351,12 +419,17 @@ async def retrieve_links(links, slots, *, fresh=False):
             product = replace(product, image_urls=list(dict.fromkeys(new_urls + old_urls))[:3])
             if new_urls:
                 async with slots:
-                    try:
-                        photo, index = await asyncio.wait_for(download_jpeg(product, tuple(range(min(len(new_urls), 3)))), 18)
-                    except asyncio.TimeoutError:
-                        pass
+                    with capture_events() as photo_events:
+                        try:
+                            photo, index = await asyncio.wait_for(download_jpeg(product, tuple(range(min(len(new_urls), 3)))), 18)
+                        except asyncio.TimeoutError:
+                            event("photo", "timeout", detail="18 с")
+                    product.trace = list(product.trace) + photo_events
                 extra = "" if photo else "Фото не удалось скачать."
-        responses[i] = (DraftItem(product, photo, index), " ".join(filter(None, (product.import_note, extra))))
+        if photo and not product.photo_source:
+            product.photo_source = "fallback" if product.used_fallback else "market"
+        responses[i] = (DraftItem(settle(product, photo), photo, index),
+                        " ".join(filter(None, (product.import_note, extra))))
     return responses
 
 
@@ -395,12 +468,29 @@ async def send_view(
     return bound
 
 
+def nearest_slot(store: DraftStore, draft: Draft) -> int | None:
+    if draft.state != "draft" or not draft.ready or CHANNEL_ID is None:
+        return None
+    try:
+        return store.free_slot(draft, CHANNEL_ID, future_slots(int(time.time()), queue_slots()))
+    except ValueError:
+        return None
+
+
 async def show_preview(bot: Bot, store: DraftStore, draft: Draft) -> None:
     try:
         photo = await asyncio.to_thread(post_photo, draft)
     except (OSError, ValueError, Image.DecompressionBombError):
         photo = None
-    await send_view(bot, store, draft, preview_text(draft), preview_keyboard(draft), photo)
+    bound = await send_view(bot, store, draft, preview_text(draft), preview_keyboard(draft, nearest_slot(store, draft)), photo)
+    gap = single_gap(draft)
+    editor = (draft.owner_id, draft.chat_id)
+    current = INPUTS.get(editor)
+    if bound and gap and (current is None or (current.auto and current.key == draft.id)):
+        # Не хватает одного поля: следующее подходящее сообщение заполнит его без нажатия кнопки.
+        INPUTS[editor] = Input(draft.id, draft.revision, gap, 0, auto=True)
+    elif current is not None and current.auto and current.key == draft.id and not gap:
+        INPUTS.pop(editor, None)
 
 
 async def show_item(bot: Bot, store: DraftStore, draft: Draft, index: int, *, more: bool = False) -> None:
@@ -412,8 +502,22 @@ async def show_item(bot: Bot, store: DraftStore, draft: Draft, index: int, *, mo
     title = head + "\n\n" + build_caption(p)
     if p.conditional_price and p.conditional_price != p.price:
         title += f"\n{html.escape(p.conditional_note)} · {fmt_price(p.conditional_price)}"
+    if p.price is not None and p.price_source:
+        source = report.PRICE_SOURCES.get(p.price_source, p.price_source)
+        when = f" · {state.age_text(time.time() - p.price_at)}" if p.price_at else ""
+        title += f"\n<i>Цена: {html.escape(source)}{when}</i>"
+    if p.provisional_title:
+        title += "\n\n⚠️ Название восстановлено из адреса ссылки Ozon и может быть неточным."
     if item.missing:
-        title += "\n\n✏️ Дополните: " + ", ".join(item.missing)
+        gaps = p.gaps or {}
+        title += "\n\n✏️ <b>Дополните</b>"
+        for label in item.missing:
+            reason = gaps.get(ui.FIELD_KEYS[label], "")
+            title += "\n• " + html.escape(label + (f" — {short_text(reason, 120)}" if reason else ""))
+        if p.reference_note:
+            title += "\nℹ️ " + html.escape(short_text(p.reference_note, 160))
+    if alt := ui.alternatives_note(p):
+        title += "\n🔀 " + alt
     if more:
         title += "\n\n🛠 Дополнительные действия"
     rows = item_buttons(draft, index, more=more) + [[button("‹ К черновику", "open", draft.id), home_button()]]
@@ -652,9 +756,71 @@ async def edit_value(
         await message.answer("Запись уже изменилась. Откройте черновик заново.")
 
 
+def merge_missing(item: DraftItem, fresh: DraftItem) -> tuple[DraftItem, list[str]]:
+    """Заполняет только пустые поля. Ручные правки администратора не трогаются."""
+    current, candidate = item.product, fresh.product
+    product = current
+    filled = []
+    confirmed = candidate.title.strip() and not candidate.provisional_title
+    if (not current.title.strip() or current.provisional_title) and confirmed:
+        product = replace(product, title=candidate.title, title_source=candidate.title_source)
+        filled.append("название")
+    elif not current.title.strip() and candidate.title.strip():
+        product = replace(product, title=candidate.title, title_source=candidate.title_source)
+        filled.append("черновое название")
+    if (current.price is None or current.price <= 0) and candidate.price:
+        product = replace(product, price=candidate.price, old_price=candidate.old_price, price_note=candidate.price_note,
+                          price_source=candidate.price_source, wb_dest=candidate.wb_dest,
+                          conditional_price=candidate.conditional_price, conditional_note=candidate.conditional_note,
+                          price_unavailable=False, price_at=candidate.price_at, used_fallback=candidate.used_fallback)
+        filled.append("цена")
+    elif current.price is None and candidate.price_unavailable:
+        product = replace(product, price_unavailable=True)
+    photo, position = item.photo, item.photo_index
+    if not photo and fresh.photo:
+        product = replace(product, image_urls=candidate.image_urls, photo_source=candidate.photo_source or "market")
+        photo, position = fresh.photo, fresh.photo_index
+        filled.append("фото")
+    elif not product.image_urls and candidate.image_urls:
+        product = replace(product, image_urls=candidate.image_urls)
+    if candidate.reference_note and not product.price:
+        product = replace(product, reference_note=candidate.reference_note)
+    if filled and sku_in_url(candidate.url) == sku_in_url(current.url):
+        product = replace(product, url=candidate.url)
+    product.trace = list(candidate.trace)
+    product.gaps = field_gaps(product, photo is not None, product.trace)
+    return DraftItem(product, photo, position), filled
+
+
+def paused_until(product: Product, missing: tuple[str, ...]) -> float | None:
+    """Если все источники недостающих полей на паузе, повтор бесполезен: сообщаем время."""
+    market = product.marketplace
+    if market == "wb" and set(missing) - {"цена"}:
+        return None  # название и фото WB берутся из каталога, у него паузы нет
+    candidates = ["ozon.page"] if market == "ozon" else ["wb.detail"]
+    if market == "ozon" and os.getenv("OZON_PRICE_FALLBACK", "1") == "1":
+        candidates.append("wbcon.ozon")
+    if market == "wb" and os.getenv("WB_PRICE_FALLBACK", "1") == "1" and wbcon.available(product):
+        candidates.append("wbcon.wb")
+    if bhapi.token(market):
+        candidates.append("bhapi." + market)
+    pauses = [state.STATE.blocked(name) for name in candidates]
+    if pauses and all(pauses):
+        return min(pause[0] for pause in pauses)
+    return None
+
+
 async def retry_missing(cb, bot, store, draft, index, slots, *, external=False):
     item = draft.items[index]
+    if draft.id in REFRESHING:
+        await cb.answer("Уже загружаю этот черновик, подождите…")
+        return
+    if not external and (until := paused_until(item.product, item.missing)):
+        await cb.answer(f"Источники на паузе до {report.moscow(until)} МСК. Сейчас можно ввести поле вручную.",
+                        show_alert=True)
+        return
     await cb.answer("Проверяю артикул в WBCON…" if external else "Загружаю недостающие поля…")
+    REFRESHING.add(draft.id)
     try:
         if external:
             async with slots:
@@ -668,32 +834,74 @@ async def retry_missing(cb, bot, store, draft, index, slots, *, external=False):
             fresh = DraftItem(candidate, photo, position)
             warning = "WBCON не вернул недостающие данные."
         else:
-            fresh, warning = await retrieve_item(item.product.marketplace, item.product.url, slots, need_photo=not item.photo)
+            fresh, warning = await retrieve_item(item.product.marketplace, item.product.url, slots,
+                                                 need_photo=not item.photo)
     except ParseError as error:
         await bot.send_message(draft.chat_id, html.escape(str(error)))
         return
-    candidate = fresh.product
-    product = replace(item.product, title=item.product.title or candidate.title)
-    if not item.product.price and candidate.price:
-        product = replace(product, price=candidate.price, old_price=candidate.old_price, price_note=candidate.price_note,
-                          price_source=candidate.price_source, wb_dest=candidate.wb_dest, conditional_price=candidate.conditional_price,
-                          conditional_note=candidate.conditional_note, price_unavailable=False)
-    photo, position = item.photo, item.photo_index
-    if not photo and fresh.photo:
-        product = replace(product, image_urls=candidate.image_urls)
-        photo, position = fresh.photo, fresh.photo_index
-    revised = DraftItem(product, photo, position)
-    if revised.missing == item.missing:
-        reason = html.escape(warning or "Новых данных пока нет.")
-        await bot.send_message(draft.chat_id, reason + " Откройте товар по ссылке в черновике и заполните поле вручную.")
+    finally:
+        REFRESHING.discard(draft.id)
+    revised, filled = merge_missing(item, fresh)
+    if not filled:
+        reason = "; ".join(f"{label} — {revised.product.gaps.get(ui.FIELD_KEYS[label], '')}".rstrip(" —")
+                           for label in revised.missing) or warning or "Новых данных пока нет."
+        await bot.send_message(draft.chat_id, html.escape(short_text(reason, 600))
+                               + "\nЗаполните поле вручную: пришлите его следующим сообщением или нажмите кнопку под товаром.")
         return
-    product.url = candidate.url
     items = list(draft.items)
     items[index] = revised
     if store.update(draft, draft.heading, tuple(items)):
         await refresh(bot, store, draft, index)
     else:
         await bot.send_message(draft.chat_id, "Черновик уже изменился. Откройте его снова в /drafts.")
+
+
+async def refill_collection(cb, bot, store, draft, slots):
+    """Дозагрузка всех неполных позиций подборки с одним сводным ответом."""
+    targets = [i for i, item in enumerate(draft.items) if item.missing]
+    if not targets:
+        await cb.answer("Все позиции заполнены.")
+        return
+    if draft.id in REFRESHING:
+        await cb.answer("Уже дозагружаю, подождите…")
+        return
+    waiting = {i: paused_until(draft.items[i].product, draft.items[i].missing) for i in targets}
+    active = [i for i in targets if not waiting[i]]
+    if not active:
+        until = min(waiting.values())
+        await cb.answer(f"Источники на паузе до {report.moscow(until)} МСК. Заполните поля вручную или повторите позже.",
+                        show_alert=True)
+        return
+    await cb.answer(f"Дозагружаю позиции: {', '.join(str(i + 1) for i in active)}…")
+    REFRESHING.add(draft.id)
+    try:
+        links = [(draft.items[i].product.marketplace, draft.items[i].product.url) for i in active]
+        responses = await retrieve_links(links, slots)
+    finally:
+        REFRESHING.discard(draft.id)
+    items = list(draft.items)
+    lines, changed = [], False
+    for i, response in zip(active, responses):
+        if isinstance(response, BaseException):
+            lines.append(f"{i + 1}. ошибка: {html.escape(short_text(str(response), 80))}")
+            continue
+        revised, filled = merge_missing(items[i], response[0])
+        if filled:
+            items[i], changed = revised, True
+            lines.append(f"{i + 1}. ✅ {', '.join(filled)}" + (f" · ещё нужно: {', '.join(revised.missing)}" if revised.missing else ""))
+        else:
+            reason = "; ".join(revised.product.gaps.get(ui.FIELD_KEYS[label], label) for label in revised.missing)
+            lines.append(f"{i + 1}. без изменений — {html.escape(short_text(reason, 120))}")
+    for i in targets:
+        if waiting[i]:
+            lines.append(f"{i + 1}. пропущено — источники на паузе до {report.moscow(waiting[i])} МСК")
+    summary = "<b>↻ Дозагрузка подборки</b>\n" + "\n".join(sorted(lines, key=lambda line: int(line.split(".")[0])))
+    if changed and not store.update(draft, draft.heading, tuple(items)):
+        summary += "\n\nЧерновик уже изменился, данные не записаны. Откройте его снова."
+        changed = False
+    await bot.send_message(draft.chat_id, summary, link_preview_options=NO_PREVIEW)
+    if changed:
+        await refresh(bot, store, draft)
 
 
 async def change_item(cb: CallbackQuery, bot: Bot, store: DraftStore, draft: Draft, name: str, index: int) -> None:
@@ -738,6 +946,12 @@ async def change_item(cb: CallbackQuery, bot: Bot, store: DraftStore, draft: Dra
             return
         items[index], items[other] = items[other], items[index]
         await cb.answer("Порядок обновлён.")
+    elif name == "first":
+        if index == 0:
+            await cb.answer("Товар уже первый.")
+            return
+        items.insert(0, items.pop(index))
+        await cb.answer("Товар стал первым. Номера и кнопки под постом сдвинулись вместе с ним.")
     else:
         if len(items) == 1:
             await cb.answer("Карточку можно удалить кнопкой «Убрать».", show_alert=True)
@@ -894,7 +1108,11 @@ async def diagnose(value, slots):
         settings.append(f"{market_name.upper()} · WBCON {'вкл.' if fallback else 'выкл.'} · "
                         f"BHAPI {'подключён' if key_set else 'без ключа'}")
     if not value:
-        return ("<b>🩺 Диагностика BorzMarket</b>\n" + "\n".join(settings) + "\n" + net.describe() + "\n\n"
+        pauses = state.STATE.blocks()
+        paused = "\n".join(f"⏸ {report.SOURCE_NAMES.get(k, k)} — пауза до {report.moscow(v[0])} МСК"
+                            for k, v in sorted(pauses.items()))
+        return ("<b>🩺 Диагностика BorzMarket v10.0</b>\n" + "\n".join(settings) + "\n" + net.describe()
+                + ("\n" + paused if paused else "") + "\n\n"
                 "Отправьте /diag и ссылку из приложения, либо <code>/diag ozon:1526882900</code> "
                 "или <code>/diag wb:866768707</code>.")
     try:
@@ -909,21 +1127,29 @@ async def diagnose(value, slots):
     except ParseError as error:
         return html.escape(str(error))
     p = item.product
-    lines = [f"<b>🩺 Диагностика · {p.market_name}</b>", settings[0 if market == "wb" else 1], net.describe()]
-    lines.extend(html.escape(line) for line in steps)
-    price = fmt_price(p.price) if p.price else "нет"
-    if p.price_source:
-        price += " · " + p.price_source
-    if p.price_note:
-        price += " · " + p.price_note
-    lines += ["", "Название · " + html.escape(short_text(p.title, 90) or "нет"),
-              "Цена · " + html.escape(price),
-              f"Фото · ссылок {len(p.image_urls)}, " + ("скачано" if item.photo else "файл не получен")]
-    if warning:
-        lines.append(html.escape(short_text(warning, 400)))
-    if item.missing:
-        lines.append("В черновике можно нажать «⚡ Заполнить быстро».")
-    return "\n".join(lines)
+    events = list(p.trace)
+    has_photo = item.photo is not None
+    head = [f"<b>🩺 Диагностика · {p.market_name}</b>"] + report.summary(p, has_photo, events, sku=sku_in_url(p.url))
+    log_lines = [html.escape(line) for line in steps] or [html.escape("· " + report.describe_event(e)) for e in events]
+    tail = []
+    if warning and item.missing:
+        tail.append("Причина · " + html.escape(short_text(warning, 300)))
+    tail.append(settings[0 if market == "wb" else 1] + " · " + html.escape(net.describe()))
+    export = report.export([(value, p, has_photo, events)]).splitlines()
+    keep = len(log_lines)
+    while True:
+        shown = log_lines if keep >= len(log_lines) else log_lines[:3] + ["…"] + log_lines[len(log_lines) - max(1, keep - 3):]
+        text = "\n".join(head + ["", "<b>Ход загрузки</b>"] + shown + [""] + tail
+                         + ["", "Для пересылки разработчику (без токенов и данных базы):",
+                            "<pre>" + html.escape("\n".join(export)) + "</pre>"])
+        if len(text) <= 4000:
+            return text
+        if keep > 4:
+            keep -= 2
+        elif len(export) > 3:
+            export = export[:2] + ["…"] + export[-1:] if len(export) > 4 else export[:3]
+        else:
+            return text[:3990]
 
 
 @router.message(Command("diag"))
@@ -1032,7 +1258,11 @@ async def on_message(
     value = (message.text or message.caption or "").strip()
     raw_urls = extract_urls(message_references(message))
     parsed = parse_article(value) if not raw_urls else None
-    if request := INPUTS.get(editor):
+    request = INPUTS.get(editor)
+    if request is not None and request.auto and not auto_accepts(request, message, raw_urls):
+        INPUTS.pop(editor, None)  # сообщение не похоже на недостающее поле: обрабатываем как обычно
+        request = None
+    if request is not None:
         if request.field == "append":
             if parsed and not parsed[0]:
                 if parsed[1] == str(editor[0]):
@@ -1078,6 +1308,25 @@ async def on_message(
     await collect_links(message, bot, store, fetch_slots, raw_urls)
 
 
+def auto_accepts(request: Input, message: Message, raw_urls: list[str]) -> bool:
+    """Подходит ли сообщение как недостающее поле. Артикулы и ссылки идут обычным путём."""
+    if raw_urls:
+        return False
+    text = (message.text or "").strip()
+    if request.field == "price":
+        compact = re.sub(r"\s", "", text)
+        return bool(text) and parse_price(text) is not None and not re.fullmatch(r"[0-9]{8,}", compact)
+    if request.field == "title":
+        return (bool(text) and not text.startswith("/") and parse_article(text) is None
+                and len(text) >= 2 and any(ch.isalpha() for ch in text))
+    if request.field == "photo":
+        photos = getattr(message, "photo", None)
+        document = getattr(message, "document", None)
+        mime = getattr(document, "mime_type", "") or ""
+        return bool(photos) or (isinstance(mime, str) and mime.startswith("image/"))
+    return False
+
+
 async def attached_photo(message, bot):
     photos = getattr(message, "photo", None)
     document = getattr(message, "document", None)
@@ -1098,17 +1347,49 @@ async def attached_photo(message, bot):
 
 
 async def supplement_message(item: DraftItem, message: Message, bot: Bot, *, quick=False):
+    """Поля из подписи или быстрого ввода. Расхождение с витриной сохраняется как вариант."""
     value = message.text or message.caption or ""
     value = value if isinstance(value, str) else ""
     title, quote = message_fields(item.product, normalize_references(value), quick=quick)
     product = item.product
-    if quote and (quick or product.price is None or product.price_source in ("wbcon", "bhapi")):
-        product = quote
-    if title and (quick or not product.title):
-        product = replace(product, title=title)
+    alternatives = dict(product.alternatives or {})
+    used = False
+    if quote is not None:
+        if quick or product.price is None or product.price_source in ("wbcon", "bhapi", "memory"):
+            if product.price is not None and product.price != quote.price:
+                alternatives["price"] = {"value": str(product.price), "label": report.PRICE_SOURCES.get(
+                    product.price_source, product.price_source or "витрины"), "source": product.price_source}
+            product = replace(quote, price_at=int(time.time()), trace=product.trace, gaps=product.gaps,
+                              title_source=product.title_source, reference_note=product.reference_note)
+            used = True
+        elif quote.price != product.price:
+            alternatives["price"] = {"value": str(quote.price), "label": "вашего сообщения", "source": "message"}
+    if title:
+        if quick or not product.title or product.provisional_title:
+            if product.title and not product.provisional_title and product.title != title:
+                alternatives["title"] = {"value": product.title, "label": TITLE_LABELS.get(product.title_source, "витрины"),
+                                         "source": product.title_source}
+            product = replace(product, title=title, title_source="message")
+            used = True
+        elif title != product.title:
+            alternatives["title"] = {"value": title, "label": "вашего сообщения", "source": "message"}
+    for name in ("price", "title"):
+        current = str(product.price) if name == "price" else product.title
+        if name in alternatives and alternatives[name]["value"] == current:
+            alternatives.pop(name)
+    if alternatives != (product.alternatives or {}):
+        product = replace(product, alternatives=alternatives)
     photo = await attached_photo(message, bot)
-    used = product is not item.product or photo is not None
-    return DraftItem(product, photo or item.photo, None if photo else item.photo_index), used
+    if photo is not None:
+        product = replace(product, photo_source="message")
+        used = True
+    revised = DraftItem(product, photo or item.photo, None if photo else item.photo_index)
+    revised.product.gaps = field_gaps(revised.product, revised.photo is not None, revised.product.trace)
+    return revised, used
+
+
+TITLE_LABELS = {"ozon.page": "Ozon", "wb.detail": "WB", "wb.basket": "WB", "wbcon": "WBCON", "bhapi": "BHAPI",
+                "memory": "памяти бота", "saved_html": "сохранённой страницы", "ozon.slug": "адреса ссылки"}
 
 
 def apply_prices(value, items):
@@ -1456,10 +1737,60 @@ async def on_callback(cb: CallbackQuery, bot: Bot, store: DraftStore, fetch_slot
         return
 
     if (
-        name in ("gallery", "shorten", "up", "down", "remove") and draft.state == "draft"
+        name in ("gallery", "shorten", "up", "down", "remove", "first") and draft.state == "draft"
         and len(extra) == 1 and re.fullmatch(r"[0-5]", extra[0]) and int(extra[0]) < len(draft.items)
     ):
         await change_item(cb, bot, store, draft, name, int(extra[0]))
+        return
+
+    if name == "refill" and draft.state == "draft" and not extra:
+        await refill_collection(cb, bot, store, draft, fetch_slots)
+        return
+
+    if (name == "titleok" and draft.state == "draft" and len(extra) == 1 and re.fullmatch(r"[0-5]", extra[0])
+            and int(extra[0]) < len(draft.items)):
+        index = int(extra[0])
+        items = list(draft.items)
+        product = items[index].product
+        if not product.provisional_title:
+            await cb.answer("Название уже подтверждено.")
+            return
+        confirmed = replace(product, title_source="confirmed",
+                            gaps={k: v for k, v in product.gaps.items() if k != "title"})
+        items[index] = replace(items[index], product=confirmed)
+        if store.update(draft, draft.heading, tuple(items)):
+            await cb.answer("Название подтверждено.")
+            await refresh(bot, store, draft, index if len(items) > 1 else None)
+        else:
+            await cb.answer("Черновик изменился. Откройте его снова.", show_alert=True)
+        return
+
+    if (name == "alt" and draft.state == "draft" and len(extra) == 2 and extra[0] in ("price", "title")
+            and re.fullmatch(r"[0-5]", extra[1]) and int(extra[1]) < len(draft.items)):
+        index = int(extra[1])
+        items = list(draft.items)
+        product = items[index].product
+        option = (product.alternatives or {}).get(extra[0])
+        if not option:
+            await cb.answer("Вариант уже применён.")
+            return
+        rest = {k: v for k, v in product.alternatives.items() if k != extra[0]}
+        if extra[0] == "price":
+            previous = {"value": str(product.price), "label": report.PRICE_SOURCES.get(product.price_source, "черновика"),
+                        "source": product.price_source} if product.price is not None else None
+            chosen = manual_price(product, Decimal(option["value"]), source=option.get("source") or "manual")
+        else:
+            previous = {"value": product.title, "label": TITLE_LABELS.get(product.title_source, "черновика"),
+                        "source": product.title_source} if product.title else None
+            chosen = replace(product, title=option["value"], title_source=option.get("source") or "manual")
+        if previous:
+            rest[extra[0]] = previous  # можно вернуть прежнее значение тем же нажатием
+        items[index] = replace(items[index], product=replace(chosen, alternatives=rest))
+        if store.update(draft, draft.heading, tuple(items)):
+            await cb.answer("Значение заменено.")
+            await refresh(bot, store, draft, index if len(items) > 1 else None)
+        else:
+            await cb.answer("Черновик изменился. Откройте его снова.", show_alert=True)
         return
 
     if name == "more" and draft.state == "draft" and len(extra) == 1 and extra[0].isdigit() and int(extra[0]) < len(draft.items):

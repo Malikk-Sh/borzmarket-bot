@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
@@ -38,15 +39,34 @@ class Product:
     used_fallback: bool = field(default=False, compare=False)
     rating: float | None = None
     feedbacks: int | None = None
+    # v10: происхождение каждого поля. Пустая строка — источник неизвестен (черновики до v10).
+    title_source: str = field(default="", compare=False)
+    photo_source: str = field(default="", compare=False)
+    price_at: int | None = field(default=None, compare=False)  # когда источник показал эту цену, unix time
+    reference_note: str = field(default="", compare=False)  # датированная справка, в пост не попадает
+    gaps: dict = field(default_factory=dict, compare=False)  # поле → почему не заполнено
+    trace: list = field(default_factory=list, compare=False, repr=False)  # события импорта, в базу не пишутся
+    # Противоречивые значения из другого источника: {"price": {"value": "1299", "source": "message"}}.
+    alternatives: dict = field(default_factory=dict, compare=False)
 
     @property
     def market_name(self) -> str:
         return MARKET_NAMES.get(self.marketplace, self.marketplace)
 
+    @property
+    def provisional_title(self) -> bool:
+        """Название восстановлено из адреса ссылки и ждёт подтверждения администратора."""
+        return self.title_source == PROVISIONAL_TITLE and bool(self.title.strip())
 
-def manual_price(product, amount):
+
+PROVISIONAL_TITLE = "ozon.slug"
+
+
+def manual_price(product, amount, source="manual"):
     return replace(product, price=amount, old_price=None, price_note="", conditional_price=None,
-                   conditional_note="", price_unavailable=False, price_source="manual")
+                   conditional_note="", price_unavailable=False, price_source=source,
+                   price_at=int(time.time()) if amount is not None else None,
+                   gaps={k: v for k, v in product.gaps.items() if k != "price"})
 
 
 def parse_price(value: object) -> Decimal | None:

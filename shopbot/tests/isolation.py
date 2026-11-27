@@ -4,8 +4,14 @@
 def reset_state() -> None:
     import net
     import prices
+    import state
     import wb
     import wbcon
+    state.reset()
+    for window in wbcon._recent.values():
+        window.clear()
+    for market in wbcon._blocked_until:
+        wbcon._blocked_until[market] = 0.0
     wbcon._cache.clear()
     prices._RESULT_CACHE.clear()
     wb._DETAIL_CACHE.clear()

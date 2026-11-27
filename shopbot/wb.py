@@ -17,10 +17,11 @@ from store_prices import kopecks, wb_quote
 
 import httpx
 
-from diagnostics import step
+from diagnostics import event, step
 from card import ParseError, Product, fmt_price
 from net import TTLCache, make_client
-from storefront import decode, from_page, read_source
+import state
+from storefront import decode, read_source
 from links import IMAGE_DOMAINS, MARKET_DOMAINS, LinkError, get_allowed, resolve_product_url
 
 HEADERS = {
@@ -89,33 +90,64 @@ def _remember_endpoint(endpoint: str) -> None:
     _endpoint_order.insert(0, endpoint)
 
 
-async def prefetch_details(client, nms) -> None:
+DETAIL_PAUSE = 600  # 403/498 у цен WB держится долго: подборка не повторяет его на каждом товаре
+
+
+def _detail_paused(fresh: bool = False):
+    if fresh:
+        return None
+    return state.STATE.blocked("wb.detail")
+
+
+def _note_failure(note: str, info: dict) -> tuple[str, float | None]:
+    """Классифицирует отказ источника цен WB и ставит паузу для блокировки и лимита."""
+    code = info.get("status")
+    if code == 429:
+        until = time.time() + max(60.0, info.get("retry_after") or 60.0)
+        state.STATE.block("wb.detail", until, note)
+        return "limit", until
+    if code in (401, 403, 498) or info.get("blocked"):
+        until = time.time() + DETAIL_PAUSE
+        state.STATE.block("wb.detail", until, note)
+        return "blocked", until
+    if "тайм-аут" in note:
+        return "timeout", None
+    return "error", None
+
+
+async def prefetch_details(client, nms, *, fresh: bool = False) -> None:
     """Один запрос на всю подборку. WB принимает несколько артикулов через «;».
 
     Ответы кладутся в короткий кэш, и _detail берёт их оттуда без новых запросов.
     Сбой не страшен: каждый товар тогда запрашивается по отдельности.
     """
     nms = list(dict.fromkeys(int(nm) for nm in nms))
-    if len(nms) < 2:
+    if len(nms) < 2 or _detail_paused(fresh):
         return
     dest = _dest()
     params = {**DETAIL_PARAMS, "dest": dest, "nm": ";".join(map(str, nms))}
     for endpoint in list(_endpoint_order):
-        response, note = await read_source(client, endpoint, DOMAINS, "Цены WB, пакет", params=params)
+        info: dict = {}
+        response, note = await read_source(client, endpoint, DOMAINS, "Цены WB, пакет", params=params, info=info)
         if note:
-            if any(code in note for code in ("HTTP 403", "HTTP 429", "HTTP 498")):
+            outcome, until = _note_failure(note, info)
+            event("wb.detail", outcome, http=info.get("status"), ms=info.get("ms"), retry_at=until,
+                  detail=f"пакет из {len(nms)}")
+            if outcome in ("blocked", "limit"):
                 return
             continue
         found = _products(response, set(nms))
         for nm, row in found.items():
             _DETAIL_CACHE.set((nm, dest), row)
+        event("wb.detail", "ok" if found else "empty", http=200, ms=info.get("ms"),
+              detail=f"пакет из {len(nms)}, найдено {len(found)}")
         if found:
             _remember_endpoint(endpoint)
             return
 
 
-async def _detail(client, nm, size_id, url):
-    """Keep identifying fields while looking for a response with a usable price."""
+async def _detail(client, nm, size_id, url, *, fresh: bool = False):
+    """Цена и название из витрины WB. Чужие артикулы в ответе отбрасываются."""
     title = ""
     notes = []
     dest = _dest()
@@ -129,42 +161,51 @@ async def _detail(client, nm, size_id, url):
         if parsed.price is not None or parsed.price_unavailable:
             if parsed.price_unavailable:
                 parsed.import_note = "WB сообщает, что товар или выбранный размер отсутствует."
+            if title:
+                parsed.title_source = "wb.detail"
+            parsed.price_at = int(time.time())
             return parsed
         return None
 
     cached = _DETAIL_CACHE.get((nm, dest))
     if cached is not None and (result := parse(cached)) is not None:
         step("Цены WB", "из пакетного запроса")
+        event("wb.detail", "cached", detail="пакетный запрос подборки")
         return result
 
-    for endpoint in list(_endpoint_order):
-        response, note = await read_source(client, endpoint, DOMAINS, "Цены WB " + urlsplit(endpoint).netloc, params=params)
-        if note:
-            notes.append(note)
-            if any(code in note for code in ("HTTP 403", "HTTP 429", "HTTP 498")):
-                break
-            continue
-        row = _products(response, {nm}).get(nm)
-        if row is None:
-            continue
-        if (result := parse(row)) is not None:
-            _remember_endpoint(endpoint)
-            return result
+    pause = _detail_paused(fresh)
+    if pause:
+        note = f"Цены WB — пауза после ответа «{pause[1].split('— ')[-1]}», {state.wait_text(pause[0])}"
+        notes.append(note)
+        step("Цены WB", "пауза после блокировки")
+        event("wb.detail", "skipped", retry_at=pause[0], detail=pause[1])
+    else:
+        for endpoint in list(_endpoint_order):
+            info: dict = {}
+            response, note = await read_source(client, endpoint, DOMAINS, "Цены WB " + urlsplit(endpoint).netloc,
+                                               params=params, info=info)
+            if note:
+                notes.append(note)
+                outcome, until = _note_failure(note, info)
+                event("wb.detail", outcome, http=info.get("status"), ms=info.get("ms"), retry_at=until,
+                      attempts=info.get("attempts", 1), detail=urlsplit(endpoint).netloc)
+                if outcome in ("blocked", "limit"):
+                    break
+                continue
+            row = _products(response, {nm}).get(nm)
+            if row is None:
+                event("wb.detail", "empty", http=200, ms=info.get("ms"), detail="в ответе нет этого артикула")
+                notes.append("Цены WB — в ответе нет этого артикула")
+                continue
+            if (result := parse(row)) is not None:
+                event("wb.detail", "ok", http=200, ms=info.get("ms"), fields=("цена",) if result.price else ())
+                state.STATE.clear("wb.detail")
+                _remember_endpoint(endpoint)
+                return result
+            event("wb.detail", "empty", http=200, ms=info.get("ms"), detail="цена для варианта не указана")
 
-    base = Product("wb", "", url)
-    markup = base
-    if not any("HTTP 429" in note for note in notes):
-        response, note = await read_source(client, url, DOMAINS, "Страница WB", page=True)
-        if response is not None:
-            markup = from_page(base, response)
-        if note:
-            notes.append(note)
-    markup.title = title or markup.title
-    if size_id is not None or dest != DETAIL_PARAMS["dest"]:
-        # Public metadata generally describes the whole product, not the chosen size.
-        markup.price = markup.old_price = None
-        markup.price_unavailable = False
-        markup.price_source = ""
+    # Страница детали WB (detail.aspx) отвечает проверкой браузера (HTTP 498): v10 её не запрашивает.
+    markup = Product("wb", title, url, title_source="wb.detail" if title else "")
     if markup.price is None:
         notes = list(dict.fromkeys(notes))
         markup.import_note = ". ".join(notes) or "WB не указал цену для выбранного размера или региона."
@@ -260,11 +301,13 @@ async def _basket_with_deadline(client, nm):
 
 
 async def _history_hint(client, nm, basket_n):
-    """A dated reference for the editor; never enters the price or the monitor."""
+    """Датированная справка для редактора. В цену и мониторинг не попадает."""
     url = f"https://basket-{basket_n:02d}.wbbasket.ru/vol{nm//100000}/part{nm//1000}/{nm}/info/price-history.json"
-    response, _ = await read_source(client, url, IMAGE_DOMAINS["wb"], "История цен WB")
+    info: dict = {}
+    response, _ = await read_source(client, url, IMAGE_DOMAINS["wb"], "История цен WB", info=info)
     rows = decode(response.text) if response is not None else None
     if not isinstance(rows, list):
+        event("wb.history", "empty" if response is not None else "error", http=info.get("status"), ms=info.get("ms"))
         return ""
     now = int(time.time())
     best_time, best_price = 0, None
@@ -275,30 +318,33 @@ async def _history_hint(client, nm, basket_n):
         amount = kopecks(row["price"].get("RUB"))
         if type(stamp) is int and 0 < stamp <= now and stamp > best_time and amount:
             best_time, best_price = stamp, amount
+    event("wb.history", "ok" if best_price else "empty", http=200, ms=info.get("ms"))
     if not best_price:
         return ""
     day = datetime.fromtimestamp(best_time, tz=timezone(timedelta(hours=3))).strftime("%d.%m.%Y")
-    return f"В истории WB за {day} — {fmt_price(best_price)}. Проверьте сегодняшнюю цену в приложении."
+    return f"В истории WB за {day} — {fmt_price(best_price)}. Это не сегодняшняя цена: сверьте в приложении."
 
 
-async def fetch_wb(url: str) -> Product:
+async def fetch_wb(url: str, *, fresh: bool = False) -> Product:
     async with make_client(headers=HEADERS, timeout=5, proxy=os.getenv("WB_PROXY") or None, impersonate=True) as client:
         nm, size_id = await _resolve_product(client, url)
         product_url = f"https://www.wildberries.ru/catalog/{nm}/detail.aspx"
         if size_id is not None:
             product_url += f"?size={size_id}"
         result, basket = await asyncio.gather(
-            _detail(client, nm, size_id, product_url), _basket_with_deadline(client, nm)
+            _detail(client, nm, size_id, product_url, fresh=fresh), _basket_with_deadline(client, nm)
         )
-        if basket and not result.price_unavailable and result.price is None and size_id is None and "HTTP 429" not in result.import_note:
+        if basket and not result.price_unavailable and result.price is None and size_id is None:
             hint = await _history_hint(client, nm, basket[0])
             if hint:
-                result.import_note = result.import_note.rstrip(".") + ". " + hint
+                result.reference_note = hint
     basket_n, card = basket if basket else (None, {})
     step("Каталог фото WB", f"basket-{basket_n:02d}" if basket_n else "карточка не получена")
+    event("wb.basket", "ok" if basket_n else "empty", detail=f"basket-{basket_n:02d}" if basket_n else "")
     title = card.get("imt_name")
-    if not result.title and isinstance(title, str):
+    if not result.title and isinstance(title, str) and title.strip():
         result.title = title.strip()
+        result.title_source = "wb.basket"
 
     images: list[str] = []
     if basket_n is not None:
@@ -320,7 +366,7 @@ async def fetch_wb(url: str) -> Product:
     return result
 
 
-async def prefetch_many(urls) -> None:
+async def prefetch_many(urls, *, fresh: bool = False) -> None:
     """Подборка из нескольких товаров WB: цены всех артикулов за один запрос."""
     nms = []
     for value in urls:
@@ -334,6 +380,6 @@ async def prefetch_many(urls) -> None:
         return
     try:
         async with make_client(headers=HEADERS, timeout=5, proxy=os.getenv("WB_PROXY") or None, impersonate=True) as client:
-            await asyncio.wait_for(prefetch_details(client, nms), 12)
+            await asyncio.wait_for(prefetch_details(client, nms, fresh=fresh), 12)
     except (httpx.HTTPError, LinkError, ParseError, asyncio.TimeoutError):
         pass

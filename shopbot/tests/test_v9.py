@@ -217,20 +217,23 @@ class OzonTests(CleanState, unittest.IsolatedAsyncioTestCase):
     def client(self, handler):
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    async def test_second_endpoint_and_warm_up_after_block(self):
+    async def test_public_page_first_without_internal_api_or_warm_up(self):
+        """v10: одна публичная страница вместо цепочки API → прогрев → второй API."""
         paths = []
+        page = ('<link rel="canonical" href="https://www.ozon.ru/product/ryukzak-12345/">'
+                '<script type="application/ld+json">' + json.dumps({
+                    "@type": "Product", "sku": "12345", "name": "Рюкзак",
+                    "image": ["https://ir.ozone.ru/a.jpg", "https://ir.ozone.ru/b.jpg"],
+                    "offers": {"price": "1199", "priceCurrency": "RUB", "availability": "https://schema.org/InStock"}})
+                + '</script>')
 
         def reply(request):
             paths.append(request.url.path)
-            if request.url.path.startswith("/api/entrypoint-api.bx"):
-                return httpx.Response(200, json=self.widgets())
-            return httpx.Response(403, text="<title>Antibot Challenge Page</title>")
+            return httpx.Response(200, text=page)
         with patch.object(ozon, "make_client", lambda **kw: self.client(reply)):
             product = await ozon.fetch_ozon(OZ_URL)
         self.assertEqual((product.title, product.price, len(product.image_urls)), ("Рюкзак", Decimal("1199"), 2))
-        self.assertEqual(paths[0], "/api/composer-api.bx/page/json/v2")
-        self.assertIn("/", paths)  # прогрев сессии главной страницей
-        self.assertEqual(paths[-1], "/api/entrypoint-api.bx/page/json/v2")
+        self.assertEqual(paths, ["/product/ryukzak-12345/"])
 
     async def test_block_without_fingerprint_library_explains_the_fix(self):
         with patch.object(ozon, "make_client", lambda **kw: self.client(lambda r: httpx.Response(403))), \

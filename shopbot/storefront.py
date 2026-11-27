@@ -7,8 +7,10 @@ import json
 import logging
 import random
 import re
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
 import httpx
@@ -38,17 +40,40 @@ def _reason(error: BaseException) -> str:
     return type(error).__name__
 
 
-async def read_source(client, url, domains, label, *, params=None, page=False, retries=1):
+def retry_after(value: str | None, now: float | None = None) -> float | None:
+    """Retry-After по RFC 9110: число секунд или HTTP-дата. Возвращает секунды ожидания."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit() and len(value) <= 7:
+        return float(value)
+    try:
+        moment = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    now = time.time() if now is None else now
+    return max(0.0, moment.timestamp() - now)
+
+
+async def read_source(client, url, domains, label, *, params=None, page=False, retries=1, timeout=6, info=None):
     """Один GET с одним повтором при тайм-ауте, обрыве связи и ответах 5xx.
 
     403, 429 и 404 не повторяются: повтор их не исправит и только злит площадку.
+    В info (если передан словарь) попадают код ответа, Retry-After, попытки и длительность.
     """
     response = None
+    started = time.perf_counter()
+    info = info if info is not None else {}
     for attempt in range(retries + 1):
         last = attempt == retries
+        info["attempts"] = attempt + 1
         try:
             response = await asyncio.wait_for(
-                get_allowed(client, url, domains, params=params, headers=PAGE_HEADERS if page else None), 6
+                get_allowed(client, url, domains, params=params, headers=PAGE_HEADERS if page else None), timeout
             )
         except (httpx.HTTPError, LinkError, asyncio.TimeoutError) as error:
             reason = _reason(error)
@@ -57,6 +82,7 @@ async def read_source(client, url, domains, label, *, params=None, page=False, r
                 continue
             step(label, reason)
             LOG.info("%s: %s", label, reason)
+            info.update(status=None, reason=reason, ms=int((time.perf_counter() - started) * 1000))
             return None, f"{label} — {reason}"
         if response.status_code in TRANSIENT_STATUS and not last:
             await asyncio.sleep(0.4 + random.random() * 0.4)
@@ -67,7 +93,10 @@ async def read_source(client, url, domains, label, *, params=None, page=False, r
     blocked = any(marker in sample for marker in BLOCK_MARKERS)
     if blocked:
         reason += " (страница проверки доступа)"
-    step(label, reason)
+    ms = int((time.perf_counter() - started) * 1000)
+    step(label, f"{reason} · {ms / 1000:.1f} с".replace(".", ","))
+    info.update(status=response.status_code, blocked=blocked, reason=reason,
+                retry_after=retry_after(response.headers.get("retry-after")), ms=ms)
     if response.status_code != 200 or blocked:
         LOG.info("%s: %s", label, reason)
         return None, f"{label} — {reason}"

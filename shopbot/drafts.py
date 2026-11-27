@@ -6,11 +6,11 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from decimal import Decimal
 from pathlib import Path
 
-from card import Product
+from card import PROVISIONAL_TITLE, Product
 from history import History, Receipt, Watch, destination_key
 
 SEND_LEASE = 180
@@ -25,9 +25,10 @@ class DraftItem:
 
     @property
     def missing(self) -> tuple[str, ...]:
+        """Чего не хватает для публикации. Черновое название из адреса ссылки ждёт подтверждения."""
         return tuple(
             label for value, label in (
-                (self.product.title.strip(), "название"),
+                (self.product.title.strip() and not self.product.provisional_title, "название"),
                 (self.product.price is not None and self.product.price > 0, "цена"),
                 (self.photo, "фото"),
             ) if not value
@@ -84,8 +85,25 @@ def _encode(items: tuple[DraftItem, ...]) -> str:
             "conditional_note": p.conditional_note,
             "image_urls": p.image_urls[:3],
             "photo_index": item.photo_index,
+            # v10: происхождение полей и причины пропусков.
+            "title_source": p.title_source, "photo_source": p.photo_source, "price_at": p.price_at,
+            "reference_note": p.reference_note, "gaps": p.gaps, "alternatives": p.alternatives,
         })
     return json.dumps(result, ensure_ascii=False)
+
+
+_PRODUCT_FIELDS = {f.name for f in dataclass_fields(Product)} - {"trace", "import_note", "used_fallback"}
+
+
+def _decode_product(fields: dict) -> Product:
+    """Неизвестные ключи (из более новой версии) пропускаются, а не роняют чтение черновика."""
+    for price in ("price", "old_price", "conditional_price"):
+        if fields.get(price) is not None:
+            fields[price] = Decimal(fields[price])
+    for name in ("gaps", "alternatives"):
+        if not isinstance(fields.get(name), dict):
+            fields.pop(name, None)
+    return Product(**{k: v for k, v in fields.items() if k in _PRODUCT_FIELDS})
 
 
 class DraftStore:
@@ -178,11 +196,8 @@ class DraftStore:
         photos = {r["item_number"]: r["data"] for r in rows}
         items = []
         for index, fields in enumerate(json.loads(row["items"])):
-            for price in ("price", "old_price", "conditional_price"):
-                if fields.get(price) is not None:
-                    fields[price] = Decimal(fields[price])
             photo_index = fields.pop("photo_index", None)
-            items.append(DraftItem(Product(**fields), photos.get(index), photo_index))
+            items.append(DraftItem(_decode_product(fields), photos.get(index), photo_index))
 
         destination = row["destination"]
         if destination and destination.lstrip("-").isdigit():
@@ -221,7 +236,8 @@ class DraftStore:
             items = json.loads(row["items"])
             photos = {int(n) for n in (row["photo_numbers"] or "").split(",") if n}
             ready = all(
-                (item.get("title") or "").strip() and Decimal(item["price"] or 0) > 0 and index in photos
+                (item.get("title") or "").strip() and item.get("title_source") != PROVISIONAL_TITLE
+                and Decimal(item["price"] or 0) > 0 and index in photos
                 for index, item in enumerate(items)
             )
             markets = "+".join(sorted({item["marketplace"] for item in items}))
@@ -278,6 +294,18 @@ class DraftStore:
             WHERE id = ? AND revision = ? AND state IN ('draft', 'queued')
         """, (run_at, destination_key(destination), now, draft.id, draft.revision)).rowcount
         return bool(changed)
+
+    def free_slot(self, draft: Draft, destination: int | str, candidates: Iterable[int]) -> int | None:
+        """Ближайший свободный слот без записи: для подписи кнопки под черновиком."""
+        now = int(time.time())
+        occupied = {row["due_at"] // 60 for row in self.conn.execute("""
+            SELECT due_at FROM drafts WHERE state IN ('queued', 'sending')
+            AND lower(destination) = ? AND due_at > ? AND id != ?
+        """, (destination_key(destination), now, draft.id))}
+        for stamp in candidates:
+            if stamp > now and stamp // 60 not in occupied:
+                return stamp
+        return None
 
     def schedule_slot(self, draft: Draft, destination: int | str, candidates: Iterable[int]) -> int | None:
         now = int(time.time())
