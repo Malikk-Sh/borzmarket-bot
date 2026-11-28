@@ -253,8 +253,8 @@ python prices.py ozon:1526882900 --diag
 Исходный файл службы не меняется. Серверный `.env` копируется с правами 600, база —
 через SQLite Backup после остановки службы. Второго экземпляра с тем же токеном не бывает.
 
-1. **Termux**, до входа на сервер: скопируйте архив из «Загрузок» на VPS. Подставьте адрес
-   из своей команды `ssh`:
+1. Архив блок скачает сам из ветки на GitHub. Если VPS не достаёт до GitHub, заранее скопируйте
+   архив из «Загрузок» телефона (**Termux**, адрес — из вашей команды `ssh`):
 
 ```bash
 scp ~/storage/downloads/borzmarket_bot_v10_1.zip root@АДРЕС_VPS:/root/
@@ -270,7 +270,9 @@ scp ~/storage/downloads/borzmarket_bot_v10_1.zip root@АДРЕС_VPS:/root/
   set -eo pipefail
   OLD=/root/borzmarket-proxy/shopbot; NEW=/root/borzmarket-v10-1/shopbot; ZIP=/root/borzmarket_bot_v10_1.zip
   DROPIN=/etc/systemd/system/borzmarket.service.d/v10-1.conf
-  test -f "$ZIP" || { echo "Нет $ZIP: сначала шаг 1 (scp)"; exit 1; }
+  URL=https://github.com/Malikk-Sh/borzmarket-bot/raw/claude/borzmarket-price-engine/borzmarket_bot_v10_1.zip
+  test -f "$ZIP" || curl -fsSL --max-time 120 -o "$ZIP" "$URL" || { rm -f "$ZIP"; echo "Архив не скачался: шаг 1 (scp)"; exit 1; }
+  sha256sum "$ZIP"
   test -f "$OLD/bot.py" && test -f "$OLD/.env" || { echo "Не найден рабочий бот в $OLD"; exit 1; }
   test ! -e "$NEW" || { echo "Папка $NEW уже есть. Переименуйте её и повторите"; exit 1; }
   echo "== 1/4 Распаковка и зависимости (бот пока работает)"

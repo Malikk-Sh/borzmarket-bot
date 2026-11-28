@@ -67,14 +67,15 @@ class RecalledPriceAutoPostTests(CleanState, unittest.IsolatedAsyncioTestCase):
         self.db = Path(self.folder.name) / "borzmarket.sqlite3"
         self.addCleanup(state.configure, None)
 
-    async def import_with_auto_post(self, remembered_source):
+    async def import_with_auto_post(self, remembered_source, page=None):
         state.configure(self.db)
-        prices.remember(Product("ozon", OZ_TITLE, OZ, Decimal("2969"), image_urls=["https://ir-20.ozone.ru/a.jpg"],
-                                price_source=remembered_source, price_at=int(time.time()) - 60))
+        if remembered_source:
+            prices.remember(Product("ozon", OZ_TITLE, OZ, Decimal("2969"), image_urls=["https://ir-20.ozone.ru/a.jpg"],
+                                    price_source=remembered_source, price_at=int(time.time()) - 60))
         state.configure(None)
         state.configure(self.db)  # «перезапуск»
         prices._RESULT_CACHE.clear()
-        no_price = ozon_page(price=None, card=None, widgets=False, ld_price="")  # страница без цены
+        no_price = page or ozon_page(price=None, card=None, widgets=False, ld_price="")  # страница без цены
         world = World([(ozon_product, httpx.Response(200, text=no_price)),
                        (ozon_image, httpx.Response(200, content=jpeg())),
                        (lambda r: r.url.host == "oz.wbcon.su", httpx.Response(429, headers={"Retry-After": "60"}))])
@@ -110,6 +111,19 @@ class RecalledPriceAutoPostTests(CleanState, unittest.IsolatedAsyncioTestCase):
     async def test_recalled_aggregator_price_also_waits(self):
         publish, _, _ = await self.import_with_auto_post("wbcon")
         publish.assert_not_awaited()
+
+    async def test_only_card_price_waits_for_the_admin(self):
+        """Витрина показала только «С банками»: цена сохраняется с условием, но сама не публикуется."""
+        page = ozon_page(price=None, card="2 672 ₽", ld_price="")
+        publish, preview, _ = await self.import_with_auto_post("", page)
+        publish.assert_not_awaited()
+        product = preview.await_args.args[2].items[0].product
+        self.assertEqual((product.price, product.price_note, product.conditional_price), (2672, "С банками", 2672))
+
+    async def test_full_storefront_price_still_auto_posts(self):
+        """Контроль: обычная цена витрины с фото по-прежнему публикуется сама при AUTO_POST=1."""
+        publish, _, _ = await self.import_with_auto_post("", ozon_page())
+        publish.assert_awaited()
 
 
 class QueueSyncTests(unittest.TestCase):
