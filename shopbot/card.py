@@ -47,6 +47,7 @@ class Product:
     price_origin: str = field(default="", compare=False)  # "" — ответ источника сейчас, "memory" — восстановлено из памяти
     seller: str = field(default="", compare=False)  # продавец предложения, если источник его назвал
     variant: str = field(default="", compare=False)  # вариант/размер, к которому относится цена
+    region: str = field(default="", compare=False)  # регион, для которого источник показал цену
     reference_note: str = field(default="", compare=False)  # датированная справка, в пост не попадает
     gaps: dict = field(default_factory=dict, compare=False)  # поле → почему не заполнено
     trace: list = field(default_factory=list, compare=False, repr=False)  # события импорта, в базу не пишутся

@@ -499,8 +499,9 @@ async def show_item(bot: Bot, store: DraftStore, draft: Draft, index: int, *, mo
         title += f"\n{html.escape(p.conditional_note)} · {fmt_price(p.conditional_price)}"
     if p.price is not None and p.price_source:
         source = report.PRICE_SOURCES.get(p.price_source, p.price_source)
-        when = f" · {state.age_text(time.time() - p.price_at)}" if p.price_at else ""
-        title += f"\n<i>Цена: {html.escape(source)}{when}</i>"
+        title += f"\n<i>Цена: {html.escape(source)} · {html.escape(report.price_age(p))}</i>"
+        if context := report.offer_context(p):
+            title += f"\n<i>{html.escape(context)}</i>"
     if p.provisional_title:
         title += "\n\n⚠️ Название восстановлено из адреса ссылки Ozon и может быть неточным."
     if item.missing:
@@ -1539,7 +1540,10 @@ async def collect_links(
     duplicate = duplicate_note(store, [item.product for item in items]) or early
     external_price = any(item.product.price_source in ("wbcon", "bhapi") for item in items)
     recalled_price = any(item.product.price_origin == "memory" for item in items)
+    conditional_only = any(item.product.conditional_price is not None and item.product.price == item.product.conditional_price
+                           and item.product.price_note for item in items)
     if (AUTO_POST and CHANNEL_ID is not None and len(links) == 1 and draft.ready and not recalled_price
+            and not conditional_only
             and not duplicate and not supplied and not external_price and not items[0].product.used_fallback):
         result, markup = await publish(bot, store, draft, CHANNEL_ID, avoid_repeat=True)
         await status.edit_text(result, reply_markup=markup)
@@ -1562,6 +1566,8 @@ async def collect_links(
         notices.append("Цена из резервного источника добавлена в черновик. Сверьте её перед публикацией.")
     if recalled_price:
         notices.append("Цена восстановлена из памяти бота: площадка сейчас её не показала. Сверьте перед публикацией.")
+    if conditional_only:
+        notices.append("Площадка показала только условную цену (по карте или кошельку). Сверьте её перед публикацией.")
     if warnings and not draft.ready:
         notices.append("Данные можно дополнить в черновике.\n" + "\n".join(warnings))
     if notices:

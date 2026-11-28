@@ -113,6 +113,12 @@ def decode(raw):
 
 
 def merged(first: Product, other: Product) -> Product:
+    result = _merged(first, other)
+    return replace(result, seller=first.seller or other.seller, region=first.region or other.region,
+                   variant=first.variant or other.variant)
+
+
+def _merged(first: Product, other: Product) -> Product:
     sold_out = first.price_unavailable or other.price_unavailable
     priced = first if first.price is not None else other
     if (first.conditional_price is not None and first.price_note and
@@ -279,6 +285,20 @@ def from_widget(base, name, widget):
     if name == "webGallery":
         values = [widget.get("coverImage"), *as_list(widget.get("images"))]
         return replace(base, image_urls=images(base, values))
+    if name == "webStickyProducts":
+        # Виджет несёт SKU (проверен выше) и продавца этого предложения.
+        seller = widget.get("seller")
+        if isinstance(seller, dict) and isinstance(seller.get("name"), str):
+            link = seller.get("link") if isinstance(seller.get("link"), str) else ""
+            slug = re.search(r"/seller/([^/?#]+)", link)
+            name = seller["name"].strip()[:80]
+            return replace(base, seller=f"{name} ({slug.group(1)})" if slug else name)
+    if name == "addressBookBarWeb":
+        cells = (widget.get("customCell") or {}).get("cells") if isinstance(widget.get("customCell"), dict) else None
+        for cell in as_list(cells):
+            text = ((cell or {}).get("button") or {}).get("text") if isinstance(cell, dict) else None
+            if isinstance(text, str) and text.strip() and text.strip() != "Укажите адрес":
+                return replace(base, region=text.strip()[:60])
     return base
 
 
@@ -298,7 +318,8 @@ class PageMarkup(HTMLParser):
         a = dict(attrs)
         if tag == "div" and a.get("data-state"):
             name = (a.get("id") or "").removeprefix("state-").split("-", 1)[0]
-            if name in ("webPrice", "webGallery", "webProductHeading", "webProductTitle"):
+            if name in ("webPrice", "webGallery", "webProductHeading", "webProductTitle", "webStickyProducts",
+                        "addressBookBarWeb"):
                 self.ozon_states.append((name, decode(a["data-state"])))
         if tag == "meta":
             key = a.get("property") or a.get("name")

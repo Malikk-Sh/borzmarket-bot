@@ -48,6 +48,7 @@ PRICE_SOURCES = {
     "ozon.webPrice": "витрина Ozon", "ozon.jsonld": "разметка карточки Ozon", "ozon.opengraph": "разметка Ozon",
     "wb.detail": "витрина WB", "wb.jsonld": "разметка WB", "wbcon": "WBCON", "bhapi": "BHAPI",
     "message": "ваше сообщение", "manual": "введено вручную", "screenshot": "скриншот", "memory": "память бота",
+    "saved_html": "сохранённая страница",
 }
 
 
@@ -151,6 +152,33 @@ def next_action(product, has_photo: bool, events: list[Event]) -> str:
     return "Пришлите «Название — цена» одним сообщением, например «Термос — 1 299 ₽»" + when + "."
 
 
+ORIGINS = {"memory": "из памяти бота", "aggregator": "резерв"}
+
+
+def price_age(product) -> str:
+    """«только что», «из памяти бота · 6 мин назад», «резерв · возраст у источника неизвестен»."""
+    parts = [ORIGINS[product.price_origin]] if product.price_origin in ORIGINS else []
+    if product.price_at:
+        parts.append(state.age_text(time.time() - product.price_at))
+    elif product.price_fetched_at:
+        parts.append(f"возраст у источника неизвестен, ответ {state.age_text(time.time() - product.price_fetched_at)}")
+    else:
+        parts.append("время неизвестно")
+    return " · ".join(parts)
+
+
+def offer_context(product) -> str:
+    """Продавец, вариант и регион предложения, если источник их назвал."""
+    parts = []
+    if product.seller:
+        parts.append(f"продавец {product.seller}")
+    if product.variant:
+        parts.append(f"вариант {product.variant}")
+    if product.region:
+        parts.append(f"регион {product.region}")
+    return " · ".join(parts)
+
+
 def mark(value: bool) -> str:
     return "✅" if value else "❌"
 
@@ -167,8 +195,7 @@ def summary(product, has_photo: bool, events: list[Event], *, sku: str = "") -> 
         price_text += f" · {source}"
         if product.price_note:
             price_text += f" · {product.price_note}"
-        if product.price_at:
-            price_text += f" · {state.age_text(time.time() - product.price_at)}"
+        price_text += " · " + price_age(product)
     title_source = TITLE_SOURCES.get(product.title_source, product.title_source)
     ready = bool(product.title.strip()) and not product.provisional_title and price is not None and has_photo
     lines = [
@@ -181,6 +208,9 @@ def summary(product, has_photo: bool, events: list[Event], *, sku: str = "") -> 
     ]
     if product.conditional_price and product.conditional_price != price:
         lines.append(f"   {html.escape(product.conditional_note)} · {fmt_price(product.conditional_price)}")
+    context = offer_context(product)
+    if context:
+        lines.append("   " + html.escape(context))
     if product.reference_note:
         lines.append("ℹ️ " + html.escape(product.reference_note))
     lines.append("👉 " + html.escape(next_action(product, has_photo, events)))

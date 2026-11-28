@@ -93,8 +93,17 @@ def wb_quote(base, product, size_id=None):
     rows = [(wb_amounts(size), size) for size in eligible]
     priced = [(pair, size) for pair, size in rows if pair[0] is not None]
     note = ""
+    variant = ""
+    supplier = product.get("supplier") if isinstance(product.get("supplier"), str) else ""
+    supplier_id = product.get("supplierId")
+    seller = (f"{supplier.strip()[:60]} ({supplier_id})" if supplier and supplier_id else supplier.strip()[:60]
+              or (str(supplier_id) if isinstance(supplier_id, int) else ""))
     if priced:
         (current, old), selected = min(priced, key=lambda record: record[0][0])
+        label = selected.get("name") or selected.get("origName") or ""
+        if size_id is not None or len(rows) == 1:
+            variant = f"{label} ({selected.get('optionId')})" if label else (
+                str(selected.get("optionId")) if selected.get("optionId") not in (None, 0, "0") else "")
         if size_id is None and len(priced) != len(rows):
             label = selected.get("name") or selected.get("origName") or selected.get("optionId")
             if len(rows) > 1 and not label:
@@ -109,7 +118,8 @@ def wb_quote(base, product, size_id=None):
     if current is None:
         return base
     return replace(base, price=current, old_price=old if old and old > current else None,
-                   price_note=note, price_source="wb.detail")
+                   price_note=note, price_source="wb.detail", seller=seller or base.seller,
+                   variant=variant or base.variant)
 
 
 def shared_quote(product, text):

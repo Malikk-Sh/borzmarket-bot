@@ -89,7 +89,7 @@ def _encode(items: tuple[DraftItem, ...]) -> str:
             "title_source": p.title_source, "photo_source": p.photo_source, "price_at": p.price_at,
             "reference_note": p.reference_note, "gaps": p.gaps, "alternatives": p.alternatives,
             "price_fetched_at": p.price_fetched_at, "price_origin": p.price_origin, "seller": p.seller,
-            "variant": p.variant,
+            "variant": p.variant, "region": p.region,
         })
     return json.dumps(result, ensure_ascii=False)
 
