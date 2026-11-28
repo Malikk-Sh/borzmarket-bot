@@ -1,6 +1,7 @@
 """Карточки и подборки BorzMarket в Telegram."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import html
 import io
@@ -15,12 +16,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -1874,6 +1877,48 @@ async def on_callback(cb: CallbackQuery, bot: Bot, store: DraftStore, fetch_slot
     await cb.answer("Это действие сейчас недоступно.", show_alert=True)
 
 
+def create_bot() -> Bot:
+    """Отдельная сессия Bot API. Клиенты маркетплейсов используют свои настройки."""
+    proxy = os.getenv("TELEGRAM_PROXY", "").strip()
+    defaults = DefaultBotProperties(parse_mode=ParseMode.HTML)
+    if not proxy:
+        return Bot(BOT_TOKEN, default=defaults)
+
+    message = "Проверьте TELEGRAM_PROXY в .env. Укажите socks5://хост:порт или http://хост:порт."
+    try:
+        address = urlsplit(proxy)
+        if (address.scheme not in ("socks5", "http") or not address.hostname or not address.port
+                or address.path not in ("", "/") or address.query or address.fragment
+                or any(char.isspace() for char in proxy)):
+            raise ValueError
+        session = AiohttpSession(proxy=proxy)
+    except (ImportError, RuntimeError):
+        raise SystemExit("Установите прокси-зависимости: .venv/bin/python -m pip install -r requirements-telegram-proxy.txt") from None
+    except ValueError:
+        raise SystemExit(message) from None
+    return Bot(BOT_TOKEN, default=defaults, session=session)
+
+
+async def check_telegram() -> int:
+    if not BOT_TOKEN:
+        raise SystemExit("Задайте BOT_TOKEN в .env")
+    route = "через прокси" if os.getenv("TELEGRAM_PROXY", "").strip() else "напрямую"
+    async with create_bot() as bot:
+        try:
+            account = await bot.get_me(request_timeout=15)
+        except TelegramUnauthorizedError:
+            print("Telegram ответил. Проверьте значение BOT_TOKEN в .env.")
+            return 1
+        except (TelegramNetworkError, TimeoutError, OSError):
+            print(f"Не удалось подключиться к Telegram {route}. Проверьте соединение.")
+            return 1
+        except TelegramAPIError as error:
+            print(f"Telegram API вернул ошибку ({type(error).__name__}).")
+            return 1
+    print(f"Telegram Bot API доступен {route}. Бот @{account.username}.")
+    return 0
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not BOT_TOKEN:
@@ -1881,7 +1926,7 @@ async def main() -> None:
     if not ADMIN_IDS:
         raise SystemExit("Задайте ADMIN_IDS в .env. Узнать свой ID можно командой /id.")
 
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = create_bot()
     store = DraftStore(DB_PATH)
     state.configure(DB_PATH)  # паузы источников и последние поля переживают перезапуск
     dp = Dispatcher()
@@ -1916,4 +1961,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-telegram", action="store_true", help="Проверить getMe без запуска бота и очереди.")
+    if parser.parse_args().check_telegram:
+        raise SystemExit(asyncio.run(check_telegram()))
     asyncio.run(main())
