@@ -17,7 +17,7 @@ from card import fmt_price, short_text
 from diagnostics import Event
 import state
 
-VERSION = "10.0"
+VERSION = "10.1"
 MOSCOW = timezone(timedelta(hours=3))
 
 SOURCE_NAMES = {
@@ -229,7 +229,15 @@ def settings_flags() -> dict:
         "curl_cffi": curl,
         "wb_dest_default": (os.getenv("WB_DEST") or "-1257786") == "-1257786",
         "tg_preview": bool(os.getenv("TG_API_ID", "").strip() and os.getenv("TG_API_HASH", "").strip()),
+        "engine_ozon": price_engine("ozon"),
+        "engine_wb": price_engine("wb"),
     }
+
+
+def price_engine(market: str) -> str:
+    """Режим источника цен (как prices.engine, без импорта prices)."""
+    value = (os.getenv(f"{market.upper()}_PRICE_ENGINE") or os.getenv("PRICE_ENGINE") or "combo").strip().lower()
+    return value if value in ("combo", "own", "legacy") else "combo"
 
 
 def export(results: list[tuple[str, object, bool, list[Event]]]) -> str:
@@ -242,7 +250,8 @@ def export(results: list[tuple[str, object, bool, list[Event]]]) -> str:
             f"{platform.machine() or '?'} · {platform.system() or '?'} · "
             f"curl_cffi={flags['curl_cffi']} · WBCON wb={int(flags['wbcon_wb'])} oz={int(flags['wbcon_ozon'])} · "
             f"BHAPI wb={int(flags['bhapi_wb'])} oz={int(flags['bhapi_ozon'])} · dest_default={int(flags['wb_dest_default'])} · "
-            f"tgprev={int(flags['tg_preview'])} · {datetime.now(MOSCOW).strftime('%d.%m %H:%M')} МСК")
+            f"tgprev={int(flags['tg_preview'])} · цены oz={flags['engine_ozon']} wb={flags['engine_wb']} · "
+            f"{datetime.now(MOSCOW).strftime('%d.%m %H:%M')} МСК")
     lines = [head]
     for value, product, has_photo, events in results:
         sku = ""
@@ -254,7 +263,8 @@ def export(results: list[tuple[str, object, bool, list[Event]]]) -> str:
         fields = "".join(("T" if product.title.strip() and not product.provisional_title else ("t" if product.title else "-"),
                           "P" if product.price is not None else ("x" if product.price_unavailable else "-"),
                           "F" if has_photo else ("f" if product.image_urls else "-")))
-        lines.append(f"- {product.marketplace}:{sku} · {fields} · цена={product.price_source or '-'}"
+        origin = {"memory": " (память)", "aggregator": " (резерв)"}.get(getattr(product, "price_origin", ""), "")
+        lines.append(f"- {product.marketplace}:{sku} · {fields} · цена={product.price_source or '-'}{origin}"
                      f" · назв={product.title_source or '-'}")
         for event in events:
             code = f" {event.http}" if event.http else ""

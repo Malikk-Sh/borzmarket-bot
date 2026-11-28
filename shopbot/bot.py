@@ -1107,7 +1107,7 @@ async def diagnose(value, slots):
         pauses = state.STATE.blocks()
         paused = "\n".join(f"⏸ {report.SOURCE_NAMES.get(k, k)} — пауза до {report.moscow(v[0])} МСК"
                             for k, v in sorted(pauses.items()))
-        return ("<b>🩺 Диагностика BorzMarket v10.0</b>\n" + "\n".join(settings) + "\n" + net.describe()
+        return (f"<b>🩺 Диагностика BorzMarket v{report.VERSION}</b>\n" + "\n".join(settings) + "\n" + net.describe()
                 + ("\n" + paused if paused else "") + "\n\n"
                 "Отправьте /diag и ссылку из приложения, либо <code>/diag ozon:1526882900</code> "
                 "или <code>/diag wb:866768707</code>.")

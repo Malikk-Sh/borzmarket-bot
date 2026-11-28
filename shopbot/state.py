@@ -174,7 +174,7 @@ class State:
         row = {name: row.get(name) for name in keys}
         last = self.last_observation(key, row["source"], row["payment"])
         if last and last["amount"] == row["amount"] and last["variant"] == (row["variant"] or "") \
-                and last["region"] == (row["region"] or ""):
+                and last["region"] == (row["region"] or "") and last["seller"] == (row["seller"] or ""):
             if self.conn is not None:
                 self.conn.execute("""UPDATE price_observations SET last_seen = ?, checks = checks + 1,
                                      observed_at = coalesce(?, observed_at) WHERE id = ?""",

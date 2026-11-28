@@ -452,7 +452,7 @@ class AuthorFlowTests(Base):
         self.assertTrue(any(line.startswith("👉") for line in lines[:8]))
         for secret in ("SECRET_TOKEN_VALUE", "bhapi-secret-key", "987654321"):
             self.assertNotIn(secret, text)
-        self.assertIn("BM-DIAG v10.0", text)
+        self.assertIn("BM-DIAG v10.1", text)
         self.assertLessEqual(len(text), 4096)
 
 
