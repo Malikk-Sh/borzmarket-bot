@@ -19,7 +19,10 @@ STABLE_FRESH = 30 * 86400
 QUOTES_LIMIT = 3000
 
 _FIELDS = ("title", "title_source", "image_urls", "price", "old_price", "price_note", "conditional_price",
-           "conditional_note", "price_source", "wb_dest", "price_at", "price_unavailable")
+           "conditional_note", "price_source", "wb_dest", "price_at", "price_unavailable", "seller", "variant")
+# Поля одного ценового предложения: заменяются только вместе.
+PRICE_GROUP = ("price", "old_price", "price_note", "conditional_price", "conditional_note", "price_source",
+               "price_at", "wb_dest", "price_unavailable", "seller", "variant")
 
 
 def _plain(value):
@@ -100,22 +103,32 @@ class State:
 
     # --- последние поля товара ----------------------------------------------------------------
     def remember(self, key: str, product, fetched_at: float | None = None) -> None:
-        """Сохраняет только поля, подтверждённые источником. Ручной ввод сюда не попадает."""
+        """Сохраняет только поля, подтверждённые источником. Ручной ввод сюда не попадает.
+
+        Цена хранится целым предложением: сумма, зачёркнутая, условная цена, подпись, источник,
+        регион и время. Новое предложение заменяет прежнее полностью, а не по одному полю.
+        Явная распродажа стирает сохранённую цену. Ответ без цены и без признака распродажи
+        оставляет прежнее состояние — в том числе «нет в наличии» — и цену не воскрешает.
+        """
         data = {name: _plain(getattr(product, name, None)) for name in _FIELDS}
         data["image_urls"] = list(product.image_urls[:3])
-        if not (data["title"] or data["price"] or data["image_urls"]):
+        if not (data["title"] or data["price"] or data["image_urls"] or product.price_unavailable):
             return
         previous = self.recall(key)
         if previous:
-            # Не затираем название или цену пустым значением из неполного ответа.
             old = previous[1]
-            for name in _FIELDS:
+            for name in ("title", "title_source", "image_urls"):
                 if data.get(name) in (None, "", []) and old.get(name) not in (None, "", []):
                     data[name] = old[name]
-            if product.price is None and old.get("price") is not None:
-                for name in ("price", "old_price", "price_note", "conditional_price", "conditional_note",
-                             "price_source", "price_at", "wb_dest"):
+            if product.price is None and not product.price_unavailable:
+                for name in PRICE_GROUP:
                     data[name] = old.get(name)
+        if product.price_unavailable:
+            for name in PRICE_GROUP:
+                data[name] = None
+            data["price_unavailable"] = True
+            data["price_source"] = product.price_source or None
+            data["price_at"] = int(time.time() if fetched_at is None else fetched_at)
         stamp = time.time() if fetched_at is None else fetched_at
         if self.conn is not None:
             self.conn.execute("""

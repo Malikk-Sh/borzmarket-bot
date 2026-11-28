@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import time
 from contextlib import suppress
 from functools import partial
@@ -1537,7 +1538,8 @@ async def collect_links(
     draft = store.create(owner, message.chat.id, tuple(items))
     duplicate = duplicate_note(store, [item.product for item in items]) or early
     external_price = any(item.product.price_source in ("wbcon", "bhapi") for item in items)
-    if (AUTO_POST and CHANNEL_ID is not None and len(links) == 1 and draft.ready
+    recalled_price = any(item.product.price_origin == "memory" for item in items)
+    if (AUTO_POST and CHANNEL_ID is not None and len(links) == 1 and draft.ready and not recalled_price
             and not duplicate and not supplied and not external_price and not items[0].product.used_fallback):
         result, markup = await publish(bot, store, draft, CHANNEL_ID, avoid_repeat=True)
         await status.edit_text(result, reply_markup=markup)
@@ -1558,6 +1560,8 @@ async def collect_links(
         notices.append("Использованы данные из вашего сообщения. Проверьте черновик.")
     if external_price:
         notices.append("Цена из резервного источника добавлена в черновик. Сверьте её перед публикацией.")
+    if recalled_price:
+        notices.append("Цена восстановлена из памяти бота: площадка сейчас её не показала. Сверьте перед публикацией.")
     if warnings and not draft.ready:
         notices.append("Данные можно дополнить в черновике.\n" + "\n".join(warnings))
     if notices:
@@ -1899,22 +1903,53 @@ def create_bot() -> Bot:
     return Bot(BOT_TOKEN, default=defaults, session=session)
 
 
+def hide_credentials(text: str) -> str:
+    """Убирает логин и пароль из адресов вида scheme://user:pass@host в тексте ошибки."""
+    return re.sub(r"([a-z0-9+.-]+://)[^/@\s]+@", r"\1***@", text, flags=re.IGNORECASE)
+
+
+def describe_connection_error(error: BaseException, via_proxy: bool) -> str:
+    """Короткая причина без traceback и без учётных данных."""
+    names = {type(item).__name__ for item in type(error).__mro__}
+    text = hide_credentials(str(error))[:160]
+    chain = error.__cause__ or error.__context__
+    if isinstance(chain, BaseException) and not text:
+        text = hide_credentials(str(chain))[:160]
+    if {"ProxyConnectionError", "ProxyError", "ProxyTimeoutError"} & names:
+        return f"Прокси недоступен или отказал: {text or type(error).__name__}"
+    if isinstance(error, socket.gaierror) or "Name or service not known" in text or "nodename nor servname" in text:
+        where = "адрес прокси" if via_proxy else "api.telegram.org"
+        return f"Не удалось найти {where} в DNS. Проверьте написание хоста в TELEGRAM_PROXY без лишних символов."
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or "timeout" in text.lower():
+        return "Истекло время ожидания ответа" + (" через прокси." if via_proxy else ".")
+    return f"Ошибка соединения ({type(error).__name__}): {text}" if text else f"Ошибка соединения ({type(error).__name__})."
+
+
 async def check_telegram() -> int:
+    """getMe без очереди, без базы и без вывода секретов. Код 0 — Bot API доступен, 1 — нет."""
     if not BOT_TOKEN:
-        raise SystemExit("Задайте BOT_TOKEN в .env")
-    route = "через прокси" if os.getenv("TELEGRAM_PROXY", "").strip() else "напрямую"
-    async with create_bot() as bot:
-        try:
-            account = await bot.get_me(request_timeout=15)
-        except TelegramUnauthorizedError:
-            print("Telegram ответил. Проверьте значение BOT_TOKEN в .env.")
-            return 1
-        except (TelegramNetworkError, TimeoutError, OSError):
-            print(f"Не удалось подключиться к Telegram {route}. Проверьте соединение.")
-            return 1
-        except TelegramAPIError as error:
-            print(f"Telegram API вернул ошибку ({type(error).__name__}).")
-            return 1
+        print("Задайте BOT_TOKEN в .env")
+        return 1
+    via_proxy = bool(os.getenv("TELEGRAM_PROXY", "").strip())
+    route = "через прокси" if via_proxy else "напрямую"
+    try:
+        async with create_bot() as bot:
+            try:
+                account = await bot.get_me(request_timeout=15)
+            except TelegramUnauthorizedError:
+                print("Telegram ответил. Проверьте значение BOT_TOKEN в .env.")
+                return 1
+            except TelegramAPIError as error:
+                if isinstance(error, TelegramNetworkError):
+                    raise
+                print(f"Telegram API вернул ошибку ({type(error).__name__}).")
+                return 1
+    except SystemExit as error:
+        print(hide_credentials(str(error)))
+        return 1
+    except Exception as error:  # сеть, DNS, SOCKS: коротко и без пароля
+        print(f"Не удалось подключиться к Telegram {route}. {describe_connection_error(error, via_proxy)}")
+        return 1
     print(f"Telegram Bot API доступен {route}. Бот @{account.username}.")
     return 0
 
@@ -1929,6 +1964,8 @@ async def main() -> None:
     bot = create_bot()
     store = DraftStore(DB_PATH)
     state.configure(DB_PATH)  # паузы источников и последние поля переживают перезапуск
+    if retired := store.retire_published():
+        log.warning("Сняты записи, уже опубликованные другой версией: %s", ", ".join(retired))
     dp = Dispatcher()
     dp.include_router(router)
     workers: list[asyncio.Task[None]] = []

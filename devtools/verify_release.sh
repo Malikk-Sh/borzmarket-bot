@@ -2,10 +2,17 @@
 # Проверка релиза «как на телефоне» в чистой папке: старая установка v9.1 с данными,
 # установка v10 блоком из README, тесты, CLI, рендер, запуск без Telegram, откат и повторная миграция.
 #   bash devtools/verify_release.sh borzmarket_bot_v9_1.zip borzmarket_bot_v10_0.zip /путь/к/пустой/папке
+# Указанная папка не очищается и не удаляется: проверка идёт в новом подкаталоге verify-XXXXXX внутри неё.
 set -euo pipefail
-OLD_ZIP=$(realpath "$1"); NEW_ZIP=$(realpath "$2"); WORK=$(realpath -m "$3")
+[ $# -eq 3 ] || { echo "Использование: verify_release.sh старый.zip новый.zip папка_для_проверок"; exit 2; }
+OLD_ZIP=$(realpath "$1"); NEW_ZIP=$(realpath "$2")
+for archive in "$OLD_ZIP" "$NEW_ZIP"; do
+  unzip -tq "$archive" >/dev/null 2>&1 || { echo "Не ZIP-архив: $archive"; exit 2; }
+done
+BASE=$(realpath -m "$3"); mkdir -p "$BASE"
+WORK=$(mktemp -d "$BASE/verify-XXXXXX")
+echo "== Рабочий каталог проверки: $WORK"
 DEV=$(cd "$(dirname "$0")" && pwd)
-rm -rf "$WORK"; mkdir -p "$WORK"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 echo "== Платформа: $(uname -m), $(python3 --version), $(date -u +%FT%TZ)"
 

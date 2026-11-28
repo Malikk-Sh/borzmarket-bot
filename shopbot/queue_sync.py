@@ -75,6 +75,17 @@ def reconcile(target: Path, authority: Path, *, unknown: str = "keep", apply: bo
         queued = tgt.execute("""SELECT id, heading, items, state, due_at FROM drafts
                                 WHERE state IN ('queued', 'sending', 'uncertain') ORDER BY due_at""").fetchall()
         copied = set()
+        # Черновик с ID, который другая версия уже опубликовала, снимается в любом состоянии:
+        # иначе его можно отправить повторно, а запись в историю упадёт на UNIQUE published.id.
+        for row in tgt.execute("SELECT id, heading, items, state FROM drafts WHERE state = 'draft'").fetchall():
+            post = published.get(row["id"])
+            if post is not None and post["status"] == "sent":
+                plan.append(f"🗑 «{_title(row)}» — черновик уже опубликован другой версией "
+                            f"{_when(post['sent_at'])} МСК. Убираю из черновиков.")
+                actions.append(("delete", row["id"]))
+                if row["id"] not in known_posts:
+                    actions.append(("copy", row["id"]))
+                    copied.add(row["id"])
         for row in queued:
             key, title = row["id"], _title(row)
             post = published.get(key)

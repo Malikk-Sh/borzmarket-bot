@@ -95,8 +95,10 @@ def recall(product) -> Product:
                               price_note=data.get("price_note") or "",
                               conditional_price=Decimal(data["conditional_price"]) if data.get("conditional_price") else None,
                               conditional_note=data.get("conditional_note") or "",
-                              price_source=data.get("price_source") or "memory", price_at=int(observed),
-                              wb_dest=data.get("wb_dest") or "")
+                              price_source=data.get("price_source") or "memory",
+                              price_at=data.get("price_at"), price_fetched_at=int(fetched_at),
+                              price_origin="memory", seller=data.get("seller") or "",
+                              variant=data.get("variant") or "", wb_dest=data.get("wb_dest") or "")
             used.append(f"цена ({state.age_text(price_age)})")
         else:
             when = datetime.fromtimestamp(observed, report.MOSCOW).strftime("%d.%m %H:%M")

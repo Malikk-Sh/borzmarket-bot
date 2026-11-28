@@ -57,6 +57,8 @@ async def check_price(
 
     store.history.record_fetches(int(time.time()), [(product.marketplace, fetch_result(item, warning))])
     current = item.product
+    if current.price_origin == "memory":
+        return None  # для мониторинга нужна свежая цена, а не восстановленная из памяти
     if (
         current.price is None or current.price <= 0
         or current.price_note.casefold() != product.price_note.casefold()
