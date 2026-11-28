@@ -1,6 +1,8 @@
 """price_lab.py на фикстурах: режимы на одном ответе, проба WBCON и сравнение с эталоном."""
 import asyncio
+import contextlib
 import csv
+import io
 import os
 import tempfile
 import unittest
@@ -46,10 +48,12 @@ class PriceLabTests(CleanState, unittest.IsolatedAsyncioTestCase):
                                    replay=None, pause=0)
             original = httpx.AsyncClient.send
             try:
-                self.assertEqual(await price_lab.main_async(args), 0)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(await price_lab.main_async(args), 0)
             finally:
                 httpx.AsyncClient.send = original
-            rows = list(csv.DictReader(out.open(encoding="utf-8")))
+            with out.open(encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
         pages = [c for c in calls if "www.ozon.ru/product" in c]
         self.assertEqual(len(pages), 1)  # combo и legacy воспроизвели ответ own
         own = [r for r in rows if r["mode"] == "own" and r["payment"] == "regular"][0]
@@ -93,9 +97,11 @@ class PriceLabTests(CleanState, unittest.IsolatedAsyncioTestCase):
     def test_template_has_separate_columns_for_regular_and_card_price(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "t.csv"
-            with patch("sys.argv", ["price_lab.py", "--template", str(path)]):
+            with patch("sys.argv", ["price_lab.py", "--template", str(path)]), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(price_lab.main(), 0)
-            rows = list(csv.DictReader(path.open(encoding="utf-8")))
+            with path.open(encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
         self.assertEqual({r["payment"] for r in rows}, {"regular", "с картой банка"})
 
 

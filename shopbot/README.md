@@ -30,6 +30,9 @@
   берётся из журнала, в том числе после перезапуска. Фоновые проверки WBCON не вызывают.
 - **`price_lab.py`** — опыт без Telegram: те же товары во всех режимах на одном ответе сети,
   отдельная проба WBCON, сравнение с эталоном из приложения и CSV. См. «Опыт цен на VPS».
+- **Итог опыта 28.11.2026** (подробно — `ОТЧЁТ_v10_1.md`): Ozon — своя цена с витрины, когда
+  страница открывается, иначе резерв с пометкой; WB — своей цены нет (403 у деталей WB), работает
+  резерв WBCON, справка из истории и ручной ввод. Режим по умолчанию `combo` подходит обеим площадкам.
 
 **Исправлено**
 
@@ -277,13 +280,13 @@ scp ~/storage/downloads/borzmarket_bot_v10_1.zip root@АДРЕС_VPS:/root/
   .venv/bin/python -m pip install -q -r requirements.txt -r requirements-telegram-proxy.txt
   .venv/bin/python -m pip install -q -r requirements-ozon.txt || echo "curl_cffi не установился, бот работает без него"
   echo "== 2/4 Проверки без рабочей базы"
-  .venv/bin/python -m unittest discover -s tests -q
+  .venv/bin/python -m unittest discover -s tests -q 2>&1 | tail -1
   install -m 600 "$OLD/.env" .env
   .venv/bin/python bot.py --check-telegram
   .venv/bin/python prices.py --direct-only --no-memory ozon:1526882900 || true
   echo "== 3/4 Переключение службы"
   back() {
-    echo "Сбой: возвращаю прежнюю версию"; systemctl stop borzmarket || true
+    echo "Сбой: возвращаю прежнюю версию"; systemctl stop borzmarket || true; cd /
     test -f "$NEW/borzmarket.sqlite3" && "$NEW/.venv/bin/python" "$NEW/rollback.py" "$OLD" --apply | tail -2 || true
     rm -f "$DROPIN"; systemctl daemon-reload; systemctl start borzmarket
   }

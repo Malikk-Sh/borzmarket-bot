@@ -1,8 +1,8 @@
 """Сборка релизного архива BorzMarket из папки shopbot/.
 
-    python3 devtools/build_release.py --version 10.0
+    python3 devtools/build_release.py --version 10.1
 
-Создаёт borzmarket_bot_v10_0.zip в корне репозитория. Внутри — каталог shopbot/ без
+Создаёт borzmarket_bot_v10_1.zip в корне репозитория. Внутри — каталог shopbot/ без
 секретов и рабочих данных: .env, базы SQLite и их WAL/SHM, сессии Telegram, окружения,
 кэши Python и логи в архив не попадают. Отказывается собирать, если находит что-то похожее
 на токен в файлах архива.

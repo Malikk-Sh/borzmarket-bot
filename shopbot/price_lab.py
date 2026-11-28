@@ -39,7 +39,7 @@ MOSCOW = timezone(timedelta(hours=3))
 FIELDS = ["run_id", "environment", "mode", "market", "sku", "variant", "seller", "region", "payment", "source",
           "origin", "observed_at", "fetched_at", "amount_rub", "reference_rub", "reference_at", "comparable",
           "deviation_rub", "deviation_pct", "reason", "http_status", "latency_ms", "cache_hit", "replayed",
-          "title", "photo_url", "photo_ok", "wbcon_calls"]
+          "title", "photo_url", "photo_ok", "wbcon_calls", "wbcon_requests"]
 REFERENCE_FIELDS = ["market", "sku", "region", "seller", "variant", "payment", "reference_rub", "reference_at",
                     "observed_by", "comment"]
 COMPARE_WINDOW = 300  # эталон и наблюдение не дальше пяти минут друг от друга
@@ -215,7 +215,9 @@ def rows_for(run_id, env, mode, product, events, replayed, value, wbcon_calls=0,
                 latency_ms=sum(e.ms or 0 for e in events), cache_hit=int(any(e.outcome == "cached" for e in events)),
                 replayed=int(replayed), title=(getattr(product, "title", "") or "")[:80],
                 photo_url=int(bool(getattr(product, "image_urls", None))),
-                photo_ok=int(getattr(product, "photo_source", "") == "market"), wbcon_calls=wbcon_calls)
+                photo_ok=int(getattr(product, "photo_source", "") == "market"), wbcon_calls=wbcon_calls,
+                # обращения к WBCON по событиям этого товара (из сети или из записи), без ответов из кэша
+                wbcon_requests=sum(1 for e in events if e.source.startswith("wbcon.") and e.http))
     if product is None:
         return [dict(base, payment="regular", amount_rub="", reason=reason_override or "нет ответа")]
     if product.price is None:
