@@ -17,9 +17,13 @@ PRICE_FRESH = 600
 # Название и ссылки на фото меняются редко: их можно подставить из прошлого импорта.
 STABLE_FRESH = 30 * 86400
 QUOTES_LIMIT = 3000
+HISTORY_KEEP = 90 * 86400  # журнал наблюдений цен: 90 дней
 
 _FIELDS = ("title", "title_source", "image_urls", "price", "old_price", "price_note", "conditional_price",
-           "conditional_note", "price_source", "wb_dest", "price_at", "price_unavailable")
+           "conditional_note", "price_source", "wb_dest", "price_at", "price_unavailable", "seller", "variant", "region")
+# Поля одного ценового предложения: заменяются только вместе.
+PRICE_GROUP = ("price", "old_price", "price_note", "conditional_price", "conditional_note", "price_source",
+               "price_at", "wb_dest", "price_unavailable", "seller", "variant", "region")
 
 
 def _plain(value):
@@ -33,6 +37,7 @@ class State:
         self.path = str(path) if path is not None else None
         self._blocks: dict[str, tuple[float, str]] = {}
         self._quotes: dict[str, tuple[float, dict]] = {}
+        self._observations: list[dict] = []
         self.conn = None
         if self.path:
             self.conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -50,8 +55,26 @@ class State:
                     fetched_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS quotes_time ON quotes (fetched_at);
+                CREATE TABLE IF NOT EXISTS price_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    sku TEXT NOT NULL,
+                    variant TEXT NOT NULL DEFAULT '',
+                    seller TEXT NOT NULL DEFAULT '',
+                    region TEXT NOT NULL DEFAULT '',
+                    payment TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    amount TEXT,
+                    observed_at REAL,
+                    first_seen REAL NOT NULL,
+                    last_seen REAL NOT NULL,
+                    checks INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS observations_key ON price_observations (key, source, payment, last_seen);
             """)
             self.conn.execute("DELETE FROM quotes WHERE fetched_at < ?", (time.time() - STABLE_FRESH,))
+            self.conn.execute("DELETE FROM price_observations WHERE last_seen < ?", (time.time() - HISTORY_KEEP,))
 
     def close(self) -> None:
         if self.conn is not None:
@@ -100,22 +123,32 @@ class State:
 
     # --- последние поля товара ----------------------------------------------------------------
     def remember(self, key: str, product, fetched_at: float | None = None) -> None:
-        """Сохраняет только поля, подтверждённые источником. Ручной ввод сюда не попадает."""
+        """Сохраняет только поля, подтверждённые источником. Ручной ввод сюда не попадает.
+
+        Цена хранится целым предложением: сумма, зачёркнутая, условная цена, подпись, источник,
+        регион и время. Новое предложение заменяет прежнее полностью, а не по одному полю.
+        Явная распродажа стирает сохранённую цену. Ответ без цены и без признака распродажи
+        оставляет прежнее состояние — в том числе «нет в наличии» — и цену не воскрешает.
+        """
         data = {name: _plain(getattr(product, name, None)) for name in _FIELDS}
         data["image_urls"] = list(product.image_urls[:3])
-        if not (data["title"] or data["price"] or data["image_urls"]):
+        if not (data["title"] or data["price"] or data["image_urls"] or product.price_unavailable):
             return
         previous = self.recall(key)
         if previous:
-            # Не затираем название или цену пустым значением из неполного ответа.
             old = previous[1]
-            for name in _FIELDS:
+            for name in ("title", "title_source", "image_urls"):
                 if data.get(name) in (None, "", []) and old.get(name) not in (None, "", []):
                     data[name] = old[name]
-            if product.price is None and old.get("price") is not None:
-                for name in ("price", "old_price", "price_note", "conditional_price", "conditional_note",
-                             "price_source", "price_at", "wb_dest"):
+            if product.price is None and not product.price_unavailable:
+                for name in PRICE_GROUP:
                     data[name] = old.get(name)
+        if product.price_unavailable:
+            for name in PRICE_GROUP:
+                data[name] = None
+            data["price_unavailable"] = True
+            data["price_source"] = product.price_source or None
+            data["price_at"] = int(time.time() if fetched_at is None else fetched_at)
         stamp = time.time() if fetched_at is None else fetched_at
         if self.conn is not None:
             self.conn.execute("""
@@ -128,6 +161,57 @@ class State:
                     SELECT key FROM quotes ORDER BY fetched_at LIMIT ?)""", (count - QUOTES_LIMIT,))
         else:
             self._quotes[key] = (stamp, data)
+
+    # --- журнал наблюдений цен ---------------------------------------------------------------
+    def observe(self, key: str, row: dict, now: float | None = None) -> str:
+        """Записывает наблюдение. Та же сумма от того же источника продлевает прошлую запись.
+
+        Возвращает «new» или «same». Смена суммы между проверками видна как новая строка:
+        так оценивается фактическая задержка обновления.
+        """
+        now = time.time() if now is None else now
+        keys = ("market", "sku", "variant", "seller", "region", "payment", "source", "amount", "observed_at")
+        row = {name: row.get(name) for name in keys}
+        last = self.last_observation(key, row["source"], row["payment"])
+        if last and last["amount"] == row["amount"] and last["variant"] == (row["variant"] or "") \
+                and last["region"] == (row["region"] or "") and last["seller"] == (row["seller"] or ""):
+            if self.conn is not None:
+                self.conn.execute("""UPDATE price_observations SET last_seen = ?, checks = checks + 1,
+                                     observed_at = coalesce(?, observed_at) WHERE id = ?""",
+                                  (now, row["observed_at"], last["id"]))
+            else:
+                last.update(last_seen=now, checks=last["checks"] + 1)
+            return "same"
+        record = dict(row, key=key, variant=row["variant"] or "", seller=row["seller"] or "",
+                      region=row["region"] or "", first_seen=now, last_seen=now, checks=1)
+        if self.conn is not None:
+            self.conn.execute("""INSERT INTO price_observations (key, market, sku, variant, seller, region, payment,
+                                 source, amount, observed_at, first_seen, last_seen, checks)
+                                 VALUES (:key, :market, :sku, :variant, :seller, :region, :payment, :source, :amount,
+                                 :observed_at, :first_seen, :last_seen, 1)""", record)
+        else:
+            record["id"] = len(self._observations) + 1
+            self._observations.append(record)
+        return "new"
+
+    def last_observation(self, key: str, source: str, payment: str = "regular") -> dict | None:
+        if self.conn is not None:
+            self.conn.row_factory = sqlite3.Row
+            row = self.conn.execute("""SELECT * FROM price_observations WHERE key = ? AND source = ? AND payment = ?
+                                       ORDER BY last_seen DESC, id DESC LIMIT 1""", (key, source, payment)).fetchone()
+            self.conn.row_factory = None
+            return dict(row) if row else None
+        rows = [r for r in self._observations if r["key"] == key and r["source"] == source and r["payment"] == payment]
+        return max(rows, key=lambda r: (r["last_seen"], r["id"])) if rows else None
+
+    def observations(self, key: str) -> list[dict]:
+        if self.conn is not None:
+            self.conn.row_factory = sqlite3.Row
+            rows = [dict(r) for r in self.conn.execute(
+                "SELECT * FROM price_observations WHERE key = ? ORDER BY first_seen, id", (key,))]
+            self.conn.row_factory = None
+            return rows
+        return [r for r in self._observations if r["key"] == key]
 
     def recall(self, key: str) -> tuple[float, dict] | None:
         if self.conn is not None:

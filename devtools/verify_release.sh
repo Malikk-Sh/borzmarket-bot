@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Проверка релиза «как на телефоне» в чистой папке: старая установка v9.1 с данными,
-# установка v10 блоком из README, тесты, CLI, рендер, запуск без Telegram, откат и повторная миграция.
-#   bash devtools/verify_release.sh borzmarket_bot_v9_1.zip borzmarket_bot_v10_0.zip /путь/к/пустой/папке
+# установка новой версии блоком из README, тесты, CLI, рендер, запуск без Telegram, откат и повторная миграция.
+#   bash devtools/verify_release.sh borzmarket_bot_v9_1.zip borzmarket_bot_v10_1.zip /путь/к/пустой/папке
+# Имена папок берутся из имени нового архива: borzmarket_bot_v10_1.zip → ~/borzmarket-v10-1.
+# Указанная папка не очищается и не удаляется: проверка идёт в новом подкаталоге verify-XXXXXX внутри неё.
 set -euo pipefail
-OLD_ZIP=$(realpath "$1"); NEW_ZIP=$(realpath "$2"); WORK=$(realpath -m "$3")
+[ $# -eq 3 ] || { echo "Использование: verify_release.sh старый.zip новый.zip папка_для_проверок"; exit 2; }
+OLD_ZIP=$(realpath "$1"); NEW_ZIP=$(realpath "$2")
+for archive in "$OLD_ZIP" "$NEW_ZIP"; do
+  unzip -tq "$archive" >/dev/null 2>&1 || { echo "Не ZIP-архив: $archive"; exit 2; }
+done
+BASE=$(realpath -m "$3"); mkdir -p "$BASE"
+TAG=$(basename "$NEW_ZIP" .zip); TAG=${TAG#borzmarket_bot_v}   # 10_1
+DIR="borzmarket-v${TAG//_/-}"                                    # borzmarket-v10-1
+WORK=$(mktemp -d "$BASE/verify-XXXXXX")
+echo "== Рабочий каталог проверки: $WORK"
 DEV=$(cd "$(dirname "$0")" && pwd)
-rm -rf "$WORK"; mkdir -p "$WORK"
 export HOME="$WORK/home"; mkdir -p "$HOME"
 echo "== Платформа: $(uname -m), $(python3 --version), $(date -u +%FT%TZ)"
 
@@ -14,25 +24,25 @@ unzip -q "$OLD_ZIP" -d "$HOME/borzmarket-v9-1"
 echo "v9.1 распакована в $HOME/borzmarket-v9-1/shopbot"
 ( cd "$HOME/borzmarket-v9-1/shopbot" && python3 -m venv .venv && .venv/bin/python -m pip install -q -r requirements.txt \
   && .venv/bin/python "$DEV/make_v91_install.py" . )
-cp "$NEW_ZIP" "$HOME/borzmarket_bot_v10_0.zip"
+cp "$NEW_ZIP" "$HOME/borzmarket_bot_v${TAG}.zip"
 
-echo "== 2. Установка v10 блоком из README (из папки прежней версии)"
+echo "== 2. Установка новой версии блоком из README (из папки прежней версии)"
 cd "$HOME/borzmarket-v9-1/shopbot"
 (
   set -e
   old_bot="$PWD"
   test -f "$old_bot/bot.py" && test -f "$old_bot/.env" || { echo "Перейдите в папку прежнего бота с bot.py и .env"; exit 1; }
-  test -f "$old_bot/borzmarket.sqlite3" && python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$old_bot/borzmarket.sqlite3" "$HOME/borzmarket-backup-before-v10.sqlite3"
-  unzip -q -n ~/borzmarket_bot_v10_0.zip -d ~/borzmarket-v10-0
-  cd ~/borzmarket-v10-0/shopbot
+  test -f "$old_bot/borzmarket.sqlite3" && python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$old_bot/borzmarket.sqlite3" "$HOME/borzmarket-backup-before-v${TAG//_/-}.sqlite3"
+  unzip -q -n ~/borzmarket_bot_v${TAG}.zip -d ~/$DIR
+  cd ~/$DIR/shopbot
   python3 -m venv .venv
   .venv/bin/python -m pip install -q -r requirements.txt
   .venv/bin/python -m pip install -q -r requirements-ozon.txt || echo "curl_cffi не установился, бот работает без него"
   .venv/bin/python migrate.py "$old_bot"
   echo "$old_bot" > ~/borzmarket-previous-folder.txt
-  echo "Готово. Резервная копия базы: $HOME/borzmarket-backup-before-v10.sqlite3"
+  echo "Готово. Резервная копия базы: $HOME/borzmarket-backup-before-v${TAG//_/-}.sqlite3"
 )
-NEW="$HOME/borzmarket-v10-0/shopbot"
+NEW="$HOME/$DIR/shopbot"
 cd "$NEW"
 .venv/bin/python -m pip list 2>/dev/null | grep -iE "^(aiogram|httpx|pillow|curl.cffi|python-dotenv) " || true
 
@@ -62,7 +72,7 @@ PRICE_MONITOR=0 .venv/bin/python "$DEV/smoke_start.py" .
 echo "== 7. Рендер примеров на этой машине"
 .venv/bin/python tools/render_examples.py --out examples --repeat 1 > /dev/null && ls examples | grep -c jpg
 
-echo "== 8. v10 публикует одну запись из очереди (имитация), затем откат"
+echo "== 8. Новая версия публикует одну запись из очереди (имитация), затем откат"
 .venv/bin/python - <<'EOF'
 import time
 from drafts import DraftStore
@@ -73,7 +83,7 @@ first = queued[0]
 assert store.claim(first, "@borzmarket_channel", int(time.time()))
 store.finish(first, "sent", receipt=Receipt(-1001234567890, "@borzmarket_channel", 78,
                                             "https://t.me/borzmarket_channel/78", int(time.time())))
-print("v10 отправила:", first.id)
+print("новая версия отправила:", first.id)
 store.close()
 EOF
 .venv/bin/python rollback.py "$(cat ~/borzmarket-previous-folder.txt)"

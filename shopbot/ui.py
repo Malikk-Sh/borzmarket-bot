@@ -64,7 +64,7 @@ def home_text(drafts: int, queued: int, next_due: str, today: int) -> str:
 
 
 WELCOME = (
-    "<b>🛍 BorzMarket v10.0</b> · редактор канала\n"
+    "<b>🛍 BorzMarket v10.1</b> · редактор канала\n"
     "Внизу — быстрые кнопки. Полная панель открывается кнопкой «🏠 Меню»."
 )
 

@@ -1,0 +1,2 @@
+# Необязательная зависимость для TELEGRAM_PROXY.
+aiohttp-socks>=0.8.4,<1

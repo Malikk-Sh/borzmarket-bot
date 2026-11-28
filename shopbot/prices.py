@@ -52,6 +52,58 @@ def _complete(product) -> bool:
                 and not product.provisional_title)
 
 
+ENGINES = ("combo", "own", "legacy")
+AGGREGATOR_TTL = 600  # ответ WBCON/BHAPI переиспользуется 10 минут, в том числе после перезапуска
+MANUAL_SOURCES = ("manual", "message", "screenshot", "saved_html")
+
+
+def engine(market: str) -> str:
+    """Режим источника цен для площадки.
+
+    combo  — собственный путь (площадка), затем память и резерв с явной пометкой (по умолчанию);
+    own    — только площадка и память бота, без WBCON и BHAPI;
+    legacy — порядок v10.0: площадка → память → WBCON → BHAPI без журнала резерва.
+    Переменные: PRICE_ENGINE для обеих площадок, OZON_PRICE_ENGINE и WB_PRICE_ENGINE отдельно.
+    """
+    value = (os.getenv(f"{market.upper()}_PRICE_ENGINE") or os.getenv("PRICE_ENGINE") or "combo").strip().lower()
+    return value if value in ENGINES else "combo"
+
+
+def observation_rows(product) -> list[dict]:
+    """Строки журнала: обычная цена и каждая условная отдельно, с контекстом предложения."""
+    base = dict(market=product.marketplace, sku=sku_in_url(product.url), variant=product.variant,
+                seller=product.seller, region=product.region or product.wb_dest, source=product.price_source,
+                observed_at=product.price_at)
+    if product.price_unavailable:
+        return [dict(base, payment="regular", amount=None)]
+    if product.price is None or not product.price_source:
+        return []
+    rows = []
+    conditional_only = product.conditional_price is not None and product.conditional_price == product.price \
+        and bool(product.price_note)
+    rows.append(dict(base, payment=product.price_note if conditional_only else "regular", amount=str(product.price)))
+    if product.conditional_price is not None and not conditional_only:
+        rows.append(dict(base, payment=product.conditional_note or "условная", amount=str(product.conditional_price)))
+    return rows
+
+
+def observe(product) -> None:
+    """В журнал попадают только ответы источников: не память, не ручной ввод."""
+    if product.price_origin == "memory" or product.price_source in MANUAL_SOURCES:
+        return
+    stamp = product.price_fetched_at or time.time()
+    for row in observation_rows(product):
+        state.STATE.observe(memory_key(product), row, now=stamp)
+
+
+def cached_aggregator(product, source: str):
+    """Свежий ответ агрегатора из журнала (combo): экономит квоту WBCON между перезапусками."""
+    row = state.STATE.last_observation(memory_key(product), source)
+    if not row or not row.get("amount") or time.time() - row["last_seen"] > AGGREGATOR_TTL:
+        return None
+    return row
+
+
 def memory_key(product) -> str:
     key = product_key(product, variant=True)
     if product.marketplace == "wb":
@@ -63,6 +115,9 @@ def remember(product) -> None:
     """В память попадают только поля от источников, без ручного ввода и черновых названий."""
     if product.price_source in ("manual", "message", "screenshot") or product.title_source in ("manual", "message"):
         return
+    observe(product)
+    if product.price_origin == "memory":
+        return  # восстановленное из памяти не перезаписывает память
     keep = product
     if product.provisional_title:
         keep = replace(product, title="", title_source="")
@@ -95,8 +150,10 @@ def recall(product) -> Product:
                               price_note=data.get("price_note") or "",
                               conditional_price=Decimal(data["conditional_price"]) if data.get("conditional_price") else None,
                               conditional_note=data.get("conditional_note") or "",
-                              price_source=data.get("price_source") or "memory", price_at=int(observed),
-                              wb_dest=data.get("wb_dest") or "")
+                              price_source=data.get("price_source") or "memory",
+                              price_at=data.get("price_at"), price_fetched_at=int(fetched_at),
+                              price_origin="memory", seller=data.get("seller") or "",
+                              variant=data.get("variant") or "", wb_dest=data.get("wb_dest") or "")
             used.append(f"цена ({state.age_text(price_age)})")
         else:
             when = datetime.fromtimestamp(observed, report.MOSCOW).strftime("%d.%m %H:%M")
@@ -149,10 +206,26 @@ def finish(product, has_photo: bool | None = None) -> Product:
 async def supplement_wb(products, *, background=False):
     """Объединяет недостающие цены WB из одной подборки в запросы по пять артикулов."""
     output = list(products)
-    if os.getenv("WB_PRICE_FALLBACK", "1") != "1":
+    mode = engine("wb")
+    if os.getenv("WB_PRICE_FALLBACK", "1") != "1" or mode == "own" or (background and mode == "combo"):
         return output
     pending = [i for i, p in enumerate(output) if isinstance(p, Product) and p.marketplace == "wb"
                and p.price is None and wbcon.available(p)]
+    if mode == "combo":
+        for i in list(pending):
+            row = cached_aggregator(output[i], "wbcon")
+            if row is None:
+                continue
+            age = time.time() - row["last_seen"]
+            with capture_events() as events:
+                event("wbcon.wb", "cached", detail=f"ответ WBCON {state.age_text(age)}")
+            output[i] = replace(output[i], price=Decimal(row["amount"]), price_note="по данным WBCON",
+                                price_source="wbcon", used_fallback=True, price_at=None,
+                                price_fetched_at=int(row["last_seen"]), price_origin="aggregator",
+                                seller=row.get("seller") or output[i].seller, region=row.get("region") or "",
+                                variant="без выбора размера", trace=list(output[i].trace) + events,
+                                import_note="Цена из WBCON (сохранённый ответ). Сверьте её в приложении перед публикацией.")
+            pending.remove(i)
     for start in range(0, len(pending), wbcon.DEMO_BATCH):
         indexes = pending[start:start + wbcon.DEMO_BATCH]
         with capture_events() as events:
@@ -174,7 +247,10 @@ async def supplement_wb(products, *, background=False):
                 output[i] = replace(p, import_note=(p.import_note + " " + reason).strip())
             else:
                 output[i] = replace(p, price=quote.price, price_note=quote.price_note, price_source="wbcon",
-                                    used_fallback=True, price_at=quote.price_at or int(time.time()),
+                                    used_fallback=True, price_at=None,
+                                    price_fetched_at=quote.price_fetched_at or int(time.time()),
+                                    seller=quote.seller or p.seller, region=quote.region,
+                                    variant="без выбора размера", price_origin="aggregator",
                                     import_note="Цена из WBCON. Сверьте её в приложении перед публикацией.")
                 remember(output[i])
     return output
@@ -190,7 +266,19 @@ async def supplement_products(products, *, allow_paid=True, background=False):
             output[index] = finish(product)
             continue
         providers = []
-        if product.marketplace == "ozon" and os.getenv("OZON_PRICE_FALLBACK", "1") == "1":
+        mode = engine(product.marketplace)
+        if mode == "own":
+            output[index] = finish(product)
+            continue
+        if product.marketplace == "ozon" and os.getenv("OZON_PRICE_FALLBACK", "1") == "1" \
+                and not (background and mode == "combo"):
+            if mode == "combo" and product.price is None and (row := cached_aggregator(product, "wbcon")):
+                with capture_events() as events:
+                    event("wbcon.ozon", "cached", detail=f"ответ WBCON {state.age_text(time.time() - row['last_seen'])}")
+                product = replace(product, price=Decimal(row["amount"]), price_note="по данным WBCON",
+                                  price_source="wbcon", used_fallback=True, price_at=None,
+                                  price_fetched_at=int(row["last_seen"]), price_origin="aggregator",
+                                  trace=list(product.trace) + events)
             providers.append(("WBCON", lambda p: wbcon.lookup(p, background=background)))
         if allow_paid and not background and bhapi.token(product.marketplace):
             providers.append(("BHAPI", bhapi.lookup))
@@ -222,8 +310,10 @@ async def supplement_products(products, *, allow_paid=True, background=False):
                 product.title_source = extra.title_source or label.lower()
             product.trace = previous.trace
             product.reference_note = previous.reference_note
-            if product.price is not None and product.price_at is None:
-                product.price_at = extra.price_at or int(time.time())
+            if product.price is not None and product.price != previous.price and extra.price is not None:
+                product.price_at = extra.price_at  # WBCON: возраст неизвестен; BHAPI: data_freshness
+                product.price_fetched_at = int(time.time())
+                product.price_origin = "aggregator"
             product.used_fallback = previous.used_fallback or bool(
                 product.title != previous.title or product.price != previous.price or product.image_urls != previous.image_urls
             )

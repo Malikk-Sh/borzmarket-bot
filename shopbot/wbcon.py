@@ -80,6 +80,10 @@ def from_payload(product, sku, payload):
             value = str(rows[0].get("salePriceU", ""))
             if value.isascii() and value.isdigit() and len(value) <= 16 and int(value) > 0:
                 result.price = Decimal(value).scaleb(-2)
+            supplier, supplier_id = rows[0].get("supplier"), rows[0].get("supplierId")
+            if isinstance(supplier, str) and supplier.strip():
+                result.seller = f"{supplier.strip()[:60]} ({supplier_id})" if supplier_id else supplier.strip()[:60]
+            result.region = "не указан сервисом"
     elif isinstance(payload, dict) and str(payload.get("article")) == sku:
         title = payload.get("name")
         result.title = title.strip() if isinstance(title, str) else ""
@@ -90,7 +94,9 @@ def from_payload(product, sku, payload):
     if result.price:
         result.price_note = "по данным WBCON"
         result.price_source = "wbcon"
-        result.price_at = int(time.time())
+        # Сервис не сообщает, когда он видел эту цену: известен только момент нашего запроса.
+        result.price_at = None
+        result.price_fetched_at = int(time.time())
     return result
 
 

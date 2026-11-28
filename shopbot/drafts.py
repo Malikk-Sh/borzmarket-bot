@@ -88,6 +88,8 @@ def _encode(items: tuple[DraftItem, ...]) -> str:
             # v10: происхождение полей и причины пропусков.
             "title_source": p.title_source, "photo_source": p.photo_source, "price_at": p.price_at,
             "reference_note": p.reference_note, "gaps": p.gaps, "alternatives": p.alternatives,
+            "price_fetched_at": p.price_fetched_at, "price_origin": p.price_origin, "seller": p.seller,
+            "variant": p.variant, "region": p.region,
         })
     return json.dumps(result, ensure_ascii=False)
 
@@ -355,8 +357,10 @@ class DraftStore:
         if not draft.ready:
             return False
         with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.conn.execute("SELECT 1 FROM published WHERE id = ?", (draft.id,)).fetchone():
+                return False  # запись с этим ID уже в истории (перенос между версиями): второй отправки не будет
             if avoid_repeat:
-                self.conn.execute("BEGIN IMMEDIATE")
                 if any(self.history.known_product(item.product, destination) for item in draft.items):
                     return False
             changed = self.conn.execute("""
@@ -393,6 +397,21 @@ class DraftStore:
                 """, (outcome, error, retry_at, int(time.time()), *owner)).rowcount
                 if changed:
                     self.history.stop_attempt(draft.id, outcome == "uncertain")
+
+    def retire_published(self) -> list[str]:
+        """Снимает черновики, чей ID уже опубликован (в истории status = 'sent').
+
+        Обычная отправка удаляет черновик сама, поэтому такое бывает только после переноса
+        базы между версиями. Вызывается при запуске до обработчика очереди.
+        """
+        with self.conn:
+            rows = [row["id"] for row in self.conn.execute("""
+                SELECT d.id FROM drafts AS d JOIN published AS p ON p.id = d.id
+                WHERE p.status = 'sent' AND d.state IN ('draft', 'queued')
+            """)]
+            for key in rows:
+                self.conn.execute("DELETE FROM drafts WHERE id = ?", (key,))
+        return rows
 
     def recover_expired(self, now: int) -> None:
         with self.conn:

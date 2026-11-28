@@ -72,6 +72,11 @@ def _dest() -> str:
     return os.getenv("WB_DEST") or DETAIL_PARAMS["dest"]
 
 
+def region_label(dest: str) -> str:
+    """dest витрины WB → подпись региона. Москва — значение по умолчанию."""
+    return "Москва (dest -1257786)" if str(dest) == "-1257786" else f"dest {dest}"
+
+
 def _products(response, wanted: set[int]) -> dict[int, dict]:
     """Товары из ответа витрины. Чужие и подставные записи отбрасываются по артикулу."""
     payload = decode(response.text)
@@ -163,7 +168,8 @@ async def _detail(client, nm, size_id, url, *, fresh: bool = False):
                 parsed.import_note = "WB сообщает, что товар или выбранный размер отсутствует."
             if title:
                 parsed.title_source = "wb.detail"
-            parsed.price_at = int(time.time())
+            parsed.price_at = parsed.price_fetched_at = int(time.time())
+            parsed.region = region_label(dest)
             return parsed
         return None
 
@@ -269,6 +275,9 @@ async def _find_basket(client: httpx.AsyncClient, nm: int) -> tuple[int, dict] |
 
     order = basket_order(vol, _basket_cache.get(vol))
     first = await probe(order[0])
+    if first is None and failures:
+        await asyncio.sleep(0.5)  # предсказанный сервер дал сбой, а не 404: одна повторная попытка
+        first = await probe(order[0])
     if first:
         _basket_cache[vol] = first[0]
         return first

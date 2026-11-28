@@ -1,0 +1,131 @@
+Имитация обновления VPS блоком из README (облако, 28.11.2026). systemctl/journalctl — заглушки,
+«запуск службы» = devtools/smoke_start.py (bot.main() без Telegram). Пути /root и /etc подменены на папку имитации.
+######## ok
+== 1/4 Распаковка и зависимости (бот пока работает)
+== 2/4 Проверки без рабочей базы
+[1/1] ozon:1526882900
+Черновики и очередь перенесены.
+База уже была. Сверил очередь с прежней версией:
+🗑 «Рюкзак» — уже опубликовано другой версией 28.11 14:04 МСК. Убираю из очереди.
+Копия до сверки: <tmp>/new/borzmarket.sqlite3.before-sync-20261128-140409
+База уже есть, очередь совпадает с прежней версией.
+Настройки перенесены.
+Черновики и очередь перенесены.
+Настройки уже есть, оставляю как есть.
+База уже есть, очередь совпадает с прежней версией.
+Черновики и очередь перенесены.
+База уже была. Сверил очередь с прежней версией:
+🗑 «Термос» — уже опубликовано другой версией 28.11 14:04 МСК. Убираю из очереди.
+Копия до сверки: <tmp>/new/borzmarket.sqlite3.before-sync-20261128-140411
+Черновики и очередь перенесены.
+----------------------------------------------------------------------
+Ran 159 tests in 6.208s
+OK (skipped=1)
+(имитация getMe: настоящий вызов проверен тестами)
+https://www.ozon.ru/product/1526882900/
+Страница Ozon — HTTP 403
+== 3/4 Переключение службы
+Настройки уже есть, оставляю как есть.
+Черновики и очередь перенесены.
+active
+== 4/4 Состояние
+enabled
+WorkingDirectory=<VPS>/root/borzmarket-v10-1/shopbot
+-- journal (имитация): -u borzmarket -n 15 --no-pager
+systemctl is-active borzmarket
+systemctl is-enabled borzmarket
+systemctl show borzmarket -p WorkingDirectory
+Готово. Копия базы до обновления: <VPS>/root/borzmarket-backup-before-v10-1.sqlite3
+== код выхода блока: 0
+== вызовы systemctl:
+systemctl stop borzmarket
+systemctl daemon-reload
+systemctl start borzmarket
+start in <VPS>/root/borzmarket-v10-1/shopbot
+systemctl is-active borzmarket
+systemctl is-enabled borzmarket
+systemctl show borzmarket -p WorkingDirectory
+== drop-in:
+[Service]
+WorkingDirectory=<VPS>/root/borzmarket-v10-1/shopbot
+ExecStart=
+ExecStart=<VPS>/root/borzmarket-v10-1/shopbot/.venv/bin/python bot.py
+== .env права: 600  совпадает: да
+== копия базы: borzmarket-backup-before-v10-1.sqlite3
+<VPS>/root/borzmarket-v10-1/shopbot/borzmarket.sqlite3
+новая база: состояния [('draft', 1), ('queued', 2)] история 1
+== состояние службы: active
+######## check_fails
+== 1/4 Распаковка и зависимости (бот пока работает)
+== 2/4 Проверки без рабочей базы
+[1/1] ozon:1526882900
+Черновики и очередь перенесены.
+База уже была. Сверил очередь с прежней версией:
+🗑 «Рюкзак» — уже опубликовано другой версией 28.11 14:04 МСК. Убираю из очереди.
+Копия до сверки: <tmp>/new/borzmarket.sqlite3.before-sync-20261128-140440
+База уже есть, очередь совпадает с прежней версией.
+Настройки перенесены.
+Черновики и очередь перенесены.
+Настройки уже есть, оставляю как есть.
+База уже есть, очередь совпадает с прежней версией.
+Черновики и очередь перенесены.
+База уже была. Сверил очередь с прежней версией:
+🗑 «Термос» — уже опубликовано другой версией 28.11 14:04 МСК. Убираю из очереди.
+Копия до сверки: <tmp>/new/borzmarket.sqlite3.before-sync-20261128-140442
+Черновики и очередь перенесены.
+----------------------------------------------------------------------
+Ran 159 tests in 6.099s
+OK (skipped=1)
+== код выхода блока: 1
+== вызовы systemctl:
+grep: <VPS>/systemctl.log: No such file or directory
+== drop-in:
+(нет)
+== .env права: 600  совпадает: да
+== копия базы: нет
+== состояние службы: active
+######## start_fails (после исправления: выход из папки перед сверкой)
+== 1/4 Распаковка и зависимости (бот пока работает)
+== 2/4 Проверки без рабочей базы
+OK (skipped=1)
+(имитация getMe: настоящий вызов проверен тестами)
+Рюкзак мужской городской для ноутбука с USB, трансформер, ручная кладь, для командировок, для путешествий, 30 л, LUGGARIKA
+2 972 ₽
+С банками · 2 674 ₽
+Источник: ozon.webPrice
+== 3/4 Переключение службы
+Настройки уже есть, оставляю как есть.
+Черновики и очередь перенесены.
+failed
+Сбой: возвращаю прежнюю версию
+Готово. Копия старой базы до сверки: <VPS>/root/borzmarket-proxy/shopbot/borzmarket.sqlite3.before-sync-20261128-140638
+Запуск прежней версии: cd <VPS>/root/borzmarket-proxy/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
+== код выхода блока: 1
+== вызовы systemctl:
+systemctl stop borzmarket
+systemctl daemon-reload
+systemctl start borzmarket
+start in <VPS>/root/borzmarket-v10-1/shopbot
+systemctl is-active borzmarket
+systemctl stop borzmarket
+systemctl daemon-reload
+systemctl start borzmarket
+start in <VPS>/root/borzmarket-proxy/shopbot
+== drop-in:
+(нет)
+== .env права: 600  совпадает: да
+== копия базы: borzmarket-backup-before-v10-1.sqlite3
+<VPS>/root/borzmarket-v10-1/shopbot/borzmarket.sqlite3
+новая база: состояния [('draft', 1), ('queued', 2)] история 1
+== состояние службы: active
+######## откат блоком из README после успешного обновления (v10.1 успела отправить одну запись из очереди)
+v10.1 отправила: fb69b6c4788644db
+== план
+🗑 «Робот-пылесос» — уже опубликовано другой версией 28.11 14:07 МСК · https://t.me/borzmarket_channel/79. Убираю из очереди.
+Это план. Чтобы выполнить, добавьте --apply.
+== откат
+Готово. Копия старой базы до сверки: <VPS>/root/borzmarket-proxy/shopbot/borzmarket.sqlite3.before-sync-20261128-140701
+active
+WorkingDirectory=<VPS>/root/borzmarket-proxy/shopbot
+старая база после отката: [('draft', 1), ('queued', 1)] постов в истории: 2
+drop-in v10-1.conf удалён, служба работает из прежней папки

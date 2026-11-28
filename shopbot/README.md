@@ -1,11 +1,53 @@
-# BorzMarket v10.0
+# BorzMarket v10.1
 
 Бот готовит карточки и подборки для Telegram из ссылок на Ozon и Wildberries.
 Одна ссылка создаёт карточку. Две–шесть ссылок в одном сообщении создают
 нумерованный коллаж со ссылками и ценами товаров.
 
-Архив релиза — `borzmarket_bot_v10_0.zip`, внутри папка `shopbot/`.
-Рекомендуемая папка установки на телефоне — `~/borzmarket-v10-0/shopbot`.
+Архив релиза — `borzmarket_bot_v10_1.zip`, внутри папка `shopbot/`.
+На VPS новая версия ставится в `/root/borzmarket-v10-1/shopbot` рядом с рабочей
+(раздел «Обновление на VPS»). На телефоне — `~/borzmarket-v10-1/shopbot`.
+
+## Что нового в v10.1
+
+**Своя цена и понятное происхождение**
+
+- **Режим источника цен** задаётся отдельно для Ozon и WB: `PRICE_ENGINE` (обе площадки),
+  `OZON_PRICE_ENGINE`, `WB_PRICE_ENGINE`. Значения:
+  - `combo` (по умолчанию) — сначала сама площадка, затем память бота и резерв WBCON/BHAPI.
+    Резерв подписан «резерв», возраст его цены — «неизвестен».
+  - `own` — только площадка и память бота. WBCON и BHAPI не вызываются.
+  - `legacy` — порядок v10.0. Нужен, чтобы быстро вернуть прежнее поведение без отката версии.
+- **Предложение целиком.** С ценой хранятся продавец (Ozon — из блока продавца того же SKU,
+  WB — поставщик), вариант/размер, регион (Ozon — из адреса доставки на странице, WB — `dest`),
+  условие оплаты и два времени: когда цену показал источник и когда бот её получил.
+  В черновике под ценой: «Цена: витрина Ozon · 2 мин назад» и «продавец Лугарика (lugarika) ·
+  регион Москва». Для WBCON: «резерв · возраст у источника неизвестен, ответ только что».
+- **Журнал наблюдений** (`price_observations` в `borzmarket.sqlite3`): каждое новое значение
+  с источником и условием оплаты, первым и последним моментом наблюдения. Повторное одинаковое
+  значение не дублируется, только продлевает запись. Хранится 90 дней.
+- **Резерв без лишних вызовов.** В режиме `combo` ответ WBCON по тому же товару 10 минут
+  берётся из журнала, в том числе после перезапуска. Фоновые проверки WBCON не вызывают.
+- **`price_lab.py`** — опыт без Telegram: те же товары во всех режимах на одном ответе сети,
+  отдельная проба WBCON, сравнение с эталоном из приложения и CSV. См. «Опыт цен на VPS».
+- **Итог опыта 28.11.2026** (подробно — `ОТЧЁТ_v10_1.md`): Ozon — своя цена с витрины, когда
+  страница открывается, иначе резерв с пометкой; WB — своей цены нет (403 у деталей WB), работает
+  резерв WBCON, справка из истории и ручной ввод. Режим по умолчанию `combo` подходит обеим площадкам.
+
+**Исправлено**
+
+- Новое предложение больше не смешивается со старым в памяти: банковская или зачёркнутая цена
+  прошлого ответа не прилипает к новой сумме. Распроданный товар стирает сохранённую цену,
+  следующий неполный ответ её не воскрешает.
+- Цена, восстановленная из памяти, и цена только «с банками» не публикуются автоматически
+  даже при `AUTO_POST=1`: черновик ждёт подтверждения.
+- Сверка очереди при миграции и откате убирает черновик, который уже опубликован под тем же ID
+  (раньше возможен повтор и `UNIQUE constraint failed: published.id`). Повторная миграция
+  ничего не ломает. При запуске бот сам убирает такие черновики.
+- `bot.py --check-telegram` при отказе прокси, ошибке DNS или недоступном SOCKS печатает одну
+  строку без логина и пароля и выходит с кодом 1, без traceback.
+- `devtools/verify_release.sh` больше не удаляет указанный каталог: проверка идёт в новом
+  подкаталоге `verify-XXXXXX`.
 
 ## Что нового в v10
 
@@ -77,7 +119,7 @@
 - `/diag` начинается с итога: «🟡 Карточка неполная · Ozon · артикул 6307910379», три поля
   ✅/⚠️/❌ и строка 👉 с одним действием. Ниже — ход загрузки со временем каждого шага
   и моментом допустимого повтора.
-- В конце — блок **«Для пересылки»**: обезличенная строка `BM-DIAG v10.0 …` без токенов,
+- В конце — блок **«Для пересылки»**: обезличенная строка `BM-DIAG v10.1 …` без токенов,
   ключей, заголовков запросов, ID и содержимого базы. Её можно переслать разработчику как есть.
 - То же самое в терминале: `.venv/bin/python prices.py ozon:1526882900 --diag`.
 
@@ -129,6 +171,8 @@ ozon:1526882900
   `BHAPI_WB_TOKEN=…` в **своём** `.env`. Фоновые проверки BHAPI не используют.
 - **parser.market** не подключён: это пакетные задания мониторинга с ожиданием результата,
   а не ответ по одному товару за секунды.
+- Что из этого вызывается, решает режим источника цен (`PRICE_ENGINE`, см. «Что нового в v10.1»).
+  В режиме `own` резерв не вызывается вовсе.
 
 ## Превью Telegram (необязательно)
 
@@ -201,12 +245,135 @@ python prices.py ozon:1526882900 --diag
 Партнёрские параметры (`WB_AFFILIATE_PARAMS`, `OZON_AFFILIATE_PARAMS`), erid и счётчик
 переходов (`CLICK_BASE_URL`) работают как в v9.1.
 
-## Обновление в Termux и Debian
+## Обновление на VPS (Cloudrix, служба systemd)
+
+Рабочий бот остаётся в `/root/borzmarket-proxy/shopbot`, новая версия ставится рядом
+в `/root/borzmarket-v10-1/shopbot`. Служба та же — `borzmarket.service`; на новую папку
+её переключает отдельный файл `/etc/systemd/system/borzmarket.service.d/v10-1.conf`.
+Исходный файл службы не меняется. Серверный `.env` копируется с правами 600, база —
+через SQLite Backup после остановки службы. Второго экземпляра с тем же токеном не бывает.
+
+1. Архив блок скачает сам из ветки на GitHub. Если VPS не достаёт до GitHub, заранее скопируйте
+   архив из «Загрузок» телефона (**Termux**, адрес — из вашей команды `ssh`):
+
+```bash
+scp ~/storage/downloads/borzmarket_bot_v10_1.zip root@АДРЕС_VPS:/root/
+```
+
+2. **VPS**, после `ssh`: вставьте блок целиком. Сначала он всё проверяет при работающем боте:
+   зависимости, тесты, `getMe` через ваш прокси, цену без Telegram. Только потом на 10–20 секунд
+   останавливает службу, делает копию базы, переносит её и запускает новую версию.
+   Если любой шаг после остановки не удался, блок сам вернёт прежнюю версию.
+
+```bash
+(
+  set -eo pipefail
+  OLD=/root/borzmarket-proxy/shopbot; NEW=/root/borzmarket-v10-1/shopbot; ZIP=/root/borzmarket_bot_v10_1.zip
+  DROPIN=/etc/systemd/system/borzmarket.service.d/v10-1.conf
+  URL=https://github.com/Malikk-Sh/borzmarket-bot/raw/claude/borzmarket-price-engine/borzmarket_bot_v10_1.zip
+  test -f "$ZIP" || curl -fsSL --max-time 120 -o "$ZIP" "$URL" || { rm -f "$ZIP"; echo "Архив не скачался: шаг 1 (scp)"; exit 1; }
+  sha256sum "$ZIP"
+  test -f "$OLD/bot.py" && test -f "$OLD/.env" || { echo "Не найден рабочий бот в $OLD"; exit 1; }
+  test ! -e "$NEW" || { echo "Папка $NEW уже есть. Переименуйте её и повторите"; exit 1; }
+  echo "== 1/4 Распаковка и зависимости (бот пока работает)"
+  python3 -m zipfile -e "$ZIP" /root/borzmarket-v10-1
+  cd "$NEW"
+  python3 -m venv .venv
+  .venv/bin/python -m pip install -q -r requirements.txt -r requirements-telegram-proxy.txt
+  .venv/bin/python -m pip install -q -r requirements-ozon.txt || echo "curl_cffi не установился, бот работает без него"
+  echo "== 2/4 Проверки без рабочей базы"
+  .venv/bin/python -m unittest discover -s tests -q 2>&1 | tail -1
+  install -m 600 "$OLD/.env" .env
+  .venv/bin/python bot.py --check-telegram
+  .venv/bin/python prices.py --direct-only --no-memory ozon:1526882900 || true
+  echo "== 3/4 Переключение службы"
+  back() {
+    echo "Сбой: возвращаю прежнюю версию"; systemctl stop borzmarket || true; cd /
+    test -f "$NEW/borzmarket.sqlite3" && "$NEW/.venv/bin/python" "$NEW/rollback.py" "$OLD" --apply | tail -2 || true
+    rm -f "$DROPIN"; systemctl daemon-reload; systemctl start borzmarket
+  }
+  systemctl stop borzmarket
+  trap back ERR
+  python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$OLD/borzmarket.sqlite3" /root/borzmarket-backup-before-v10-1.sqlite3
+  .venv/bin/python migrate.py "$OLD"
+  mkdir -p "$(dirname "$DROPIN")"
+  printf '[Service]\nWorkingDirectory=%s\nExecStart=\nExecStart=%s/.venv/bin/python bot.py\n' "$NEW" "$NEW" > "$DROPIN"
+  systemctl daemon-reload
+  systemctl start borzmarket
+  sleep 10
+  systemctl is-active borzmarket
+  trap - ERR
+  echo "== 4/4 Состояние"
+  systemctl is-enabled borzmarket || true
+  systemctl show borzmarket -p WorkingDirectory
+  journalctl -u borzmarket -n 15 --no-pager
+  echo "Готово. Копия базы до обновления: /root/borzmarket-backup-before-v10-1.sqlite3"
+)
+```
+
+3. **Telegram**, личка бота: `/start` (видна строка «BorzMarket v10.1»), затем пришлите
+   `ozon:1526882900`. Под ценой черновика должны быть строки «Цена: … · … назад» и «продавец …».
+   Черновик никуда не публикуется, пока вы не нажмёте кнопку.
+
+**Строка диагностики для пересылки** (VPS, бот можно не останавливать; 1–3 запроса на товар):
+
+```bash
+cd /root/borzmarket-v10-1/shopbot && .venv/bin/python prices.py --diag --no-memory ozon:1526882900 wb:866768707 2>&1 | sed -n '/^BM-DIAG/,$p'
+```
+
+Вывод начинается с `BM-DIAG v10.1` и не содержит токенов, адреса прокси и данных базы.
+
+**Вернуть прежний источник цен без отката версии.** Добавьте в `/root/borzmarket-v10-1/shopbot/.env`
+строку `PRICE_ENGINE=legacy` (или только `WB_PRICE_ENGINE=legacy`) и выполните
+`systemctl restart borzmarket`.
+
+### Откат на установленную v10.0 (VPS)
+
+Сначала посмотрите план: он покажет, какие посты v10.1 уже отправила. Их уберут из старой
+очереди, чтобы не отправить второй раз. Затем выполните сверку и верните службу.
+
+```bash
+cd /root/borzmarket-v10-1/shopbot && .venv/bin/python rollback.py /root/borzmarket-proxy/shopbot
+```
+
+```bash
+(
+  set -e
+  systemctl stop borzmarket
+  cd /root/borzmarket-v10-1/shopbot && .venv/bin/python rollback.py /root/borzmarket-proxy/shopbot --apply | tail -3
+  rm -f /etc/systemd/system/borzmarket.service.d/v10-1.conf
+  systemctl daemon-reload && systemctl start borzmarket && sleep 10
+  systemctl is-active borzmarket; systemctl show borzmarket -p WorkingDirectory
+)
+```
+
+Папка `/root/borzmarket-v10-1` и её база остаются. Чтобы снова перейти на v10.1, верните
+файл `v10-1.conf` тем же `printf` из блока выше и перед запуском выполните
+`.venv/bin/python migrate.py /root/borzmarket-proxy/shopbot` в папке v10.1: он уберёт из её очереди
+то, что успела отправить v10.0.
+
+## Опыт цен на VPS (`price_lab.py`)
+
+Сравнивает режимы на одних и тех же товарах без Telegram и без рабочей базы. Платные ключи
+в опыте выключены. Один ответ площадки используется во всех режимах (запись `--record`).
+Пауза WBCON общая с работающим ботом: при лимите опыт ждёт одно окно и идёт дальше.
+
+```bash
+cd /root/borzmarket-v10-1/shopbot && .venv/bin/python price_lab.py ozon:1526882900 https://ozon.ru/t/377XHKT wb:866768707 --modes own,combo,legacy --wbcon --env vps --pause 20 --out /root/price_lab_vps.csv
+```
+
+Эталон из приложения: `.venv/bin/python price_lab.py --template /root/reference.csv` создаёт
+пустой шаблон. В нём обычная цена и цена с картой — отдельные строки. Заполните сумму,
+продавца, город и время по Москве не позже пяти минут от запуска опыта и добавьте
+`--reference /root/reference.csv`. Отклонения появятся в колонках `deviation_rub`
+и `deviation_pct`, итог по площадке — в последних строках вывода.
+
+## Обновление на телефоне (Termux и Debian)
 
 Блоки подписаны: **Termux** — обычная строка `~ $`, **Debian** — строка `root@localhost:~#`
 после `proot-distro login shopbot-debian`.
 
-1. Скачайте `borzmarket_bot_v10_0.zip` в «Загрузки» Android.
+1. Скачайте `borzmarket_bot_v10_1.zip` в «Загрузки» Android.
 2. **Termux**, новая сессия:
 
 ```bash
@@ -214,14 +381,14 @@ termux-wake-lock
 ```
 
 ```bash
-proot-distro copy ~/storage/downloads/borzmarket_bot_v10_0.zip shopbot-debian:/root/borzmarket_bot_v10_0.zip
+proot-distro copy ~/storage/downloads/borzmarket_bot_v10_1.zip shopbot-debian:/root/borzmarket_bot_v10_1.zip
 ```
 
 3. **Debian**, сессия с работающим ботом: нажмите **Ctrl+C**. Перейдите в папку прежней версии
-   (обычно `~/borzmarket-v9-1/shopbot`; список установок — `find /root -maxdepth 4 -type f -name bot.py`):
+   (обычно `~/borzmarket-v10-0/shopbot`; список установок — `find /root -maxdepth 4 -type f -name bot.py`):
 
 ```bash
-cd ~/borzmarket-v9-1/shopbot
+cd ~/borzmarket-v10-0/shopbot
 ```
 
 4. **Debian**, установка с переносом данных (прежняя папка не меняется, база копируется):
@@ -231,28 +398,28 @@ cd ~/borzmarket-v9-1/shopbot
   set -e
   old_bot="$PWD"
   test -f "$old_bot/bot.py" && test -f "$old_bot/.env" || { echo "Перейдите в папку прежнего бота с bot.py и .env"; exit 1; }
-  test -f "$old_bot/borzmarket.sqlite3" && python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$old_bot/borzmarket.sqlite3" "$HOME/borzmarket-backup-before-v10.sqlite3"
-  unzip -n ~/borzmarket_bot_v10_0.zip -d ~/borzmarket-v10-0
-  cd ~/borzmarket-v10-0/shopbot
+  test -f "$old_bot/borzmarket.sqlite3" && python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$old_bot/borzmarket.sqlite3" "$HOME/borzmarket-backup-before-v10-1.sqlite3"
+  unzip -n ~/borzmarket_bot_v10_1.zip -d ~/borzmarket-v10-1
+  cd ~/borzmarket-v10-1/shopbot
   python3 -m venv .venv
   .venv/bin/python -m pip install -r requirements.txt
   .venv/bin/python -m pip install -r requirements-ozon.txt || echo "curl_cffi не установился, бот работает без него"
   .venv/bin/python migrate.py "$old_bot"
   echo "$old_bot" > ~/borzmarket-previous-folder.txt
-  echo "Готово. Резервная копия базы: $HOME/borzmarket-backup-before-v10.sqlite3"
+  echo "Готово. Резервная копия базы: $HOME/borzmarket-backup-before-v10-1.sqlite3"
 )
 ```
 
 5. **Debian**, проверка установки (около 10 секунд, сеть не нужна):
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && .venv/bin/python -m unittest discover -s tests
+cd ~/borzmarket-v10-1/shopbot && .venv/bin/python -m unittest discover -s tests
 ```
 
 6. **Debian**, запуск. Успешный запуск виден по строке `Run polling for bot`:
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
+cd ~/borzmarket-v10-1/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
 ```
 
 ### Обычный запуск
@@ -260,7 +427,7 @@ cd ~/borzmarket-v10-0/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
 **Termux**: `termux-wake-lock`, затем `proot-distro login shopbot-debian`. **Debian**:
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
+cd ~/borzmarket-v10-1/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
 ```
 
 ### Проверка на телефоне
@@ -268,7 +435,7 @@ cd ~/borzmarket-v10-0/shopbot && env -u ADMIN_IDS .venv/bin/python bot.py
 **Debian**, отдельно от бота (бота можно не останавливать). Делает по 1–3 запроса на товар:
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && .venv/bin/python prices.py ozon:1526882900 https://ozon.ru/t/377XHKT wb:866768707 --diag
+cd ~/borzmarket-v10-1/shopbot && .venv/bin/python prices.py ozon:1526882900 https://ozon.ru/t/377XHKT wb:866768707 --diag
 ```
 
 В Telegram, в личке бота: `/start`, затем по очереди `/diag ozon:1526882900`,
@@ -276,20 +443,20 @@ cd ~/borzmarket-v10-0/shopbot && .venv/bin/python prices.py ozon:1526882900 http
 дождитесь указанного времени. Для теста публикации заведите отдельный тестовый канал
 и временно укажите его в `CHANNEL_ID`.
 
-### Откат на v9.1
+### Откат на прежнюю версию (телефон)
 
-1. **Debian**: остановите v10 (**Ctrl+C**).
+1. **Debian**: остановите v10.1 (**Ctrl+C**).
 2. **Debian**, посмотреть план сверки (ничего не меняет):
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && .venv/bin/python rollback.py "$(cat ~/borzmarket-previous-folder.txt)"
+cd ~/borzmarket-v10-1/shopbot && .venv/bin/python rollback.py "$(cat ~/borzmarket-previous-folder.txt)"
 ```
 
-3. **Debian**, выполнить сверку. Посты, которые v10 уже отправила из очереди, уберутся из
+3. **Debian**, выполнить сверку. Посты, которые v10.1 уже отправила из очереди, уберутся из
    старой очереди; копия старой базы сохранится рядом с ней:
 
 ```bash
-cd ~/borzmarket-v10-0/shopbot && .venv/bin/python rollback.py "$(cat ~/borzmarket-previous-folder.txt)" --apply
+cd ~/borzmarket-v10-1/shopbot && .venv/bin/python rollback.py "$(cat ~/borzmarket-previous-folder.txt)" --apply
 ```
 
 4. **Debian**, запуск прежней версии:
@@ -298,8 +465,8 @@ cd ~/borzmarket-v10-0/shopbot && .venv/bin/python rollback.py "$(cat ~/borzmarke
 cd "$(cat ~/borzmarket-previous-folder.txt)" && env -u ADMIN_IDS .venv/bin/python bot.py
 ```
 
-Если потом вернётесь на v10, сначала выполните в **Debian**
-`cd ~/borzmarket-v10-0/shopbot && .venv/bin/python migrate.py "$(cat ~/borzmarket-previous-folder.txt)"`:
+Если потом вернётесь на v10.1, сначала выполните в **Debian**
+`cd ~/borzmarket-v10-1/shopbot && .venv/bin/python migrate.py "$(cat ~/borzmarket-previous-folder.txt)"`:
 он уберёт из очереди v10 то, что успела отправить прежняя версия.
 
 Очередь и проверки цен работают, пока бот запущен. `termux-wake-lock` удерживает процессор при
@@ -322,6 +489,39 @@ cp -n .env.example .env
 ```bash
 .venv/bin/python bot.py
 ```
+
+## Telegram через прокси на VPS
+
+В папке `shopbot` установите зависимость прокси:
+
+```bash
+.venv/bin/python -m pip install -r requirements-telegram-proxy.txt
+```
+
+Добавьте в существующий `.env` одну строку. Этот пример подходит для SOCKS5-туннеля,
+который уже слушает порт 1080 на том же VPS:
+
+```dotenv
+TELEGRAM_PROXY=socks5://127.0.0.1:1080
+```
+
+Для своего прокси подставьте его хост и порт. Поддерживаются `socks5://` и
+`http://` (HTTP CONNECT). При авторизации подходит формат
+`socks5://login:password@host:port`. Специальные символы в логине и пароле
+должны быть закодированы как в URL. Пустое значение включает прямое соединение.
+
+Сначала проверьте соединение из папки, где находится рабочий `.env`:
+
+```bash
+.venv/bin/python bot.py --check-telegram
+```
+
+Команда вызывает `getMe`, выводит имя бота и способ подключения. Она не запускает
+получение сообщений и не открывает очередь. После успешной проверки остановите
+прежний экземпляр с тем же токеном, затем запустите бот на VPS обычной командой.
+У маркетплейсов свои параметры `OZON_PROXY` и `WB_PROXY`. Необязательное превью
+на Telethon использует отдельное подключение. Для базовой работы бота
+`TG_API_ID` и `TG_API_HASH` можно оставить пустыми.
 
 ## Примеры оформления на своём устройстве
 

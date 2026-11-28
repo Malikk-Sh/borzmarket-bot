@@ -1,6 +1,7 @@
 """Карточки и подборки BorzMarket в Telegram."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import html
 import io
@@ -8,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import time
 from contextlib import suppress
 from functools import partial
@@ -15,12 +17,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -495,8 +499,9 @@ async def show_item(bot: Bot, store: DraftStore, draft: Draft, index: int, *, mo
         title += f"\n{html.escape(p.conditional_note)} · {fmt_price(p.conditional_price)}"
     if p.price is not None and p.price_source:
         source = report.PRICE_SOURCES.get(p.price_source, p.price_source)
-        when = f" · {state.age_text(time.time() - p.price_at)}" if p.price_at else ""
-        title += f"\n<i>Цена: {html.escape(source)}{when}</i>"
+        title += f"\n<i>Цена: {html.escape(source)} · {html.escape(report.price_age(p))}</i>"
+        if context := report.offer_context(p):
+            title += f"\n<i>{html.escape(context)}</i>"
     if p.provisional_title:
         title += "\n\n⚠️ Название восстановлено из адреса ссылки Ozon и может быть неточным."
     if item.missing:
@@ -1102,7 +1107,7 @@ async def diagnose(value, slots):
         pauses = state.STATE.blocks()
         paused = "\n".join(f"⏸ {report.SOURCE_NAMES.get(k, k)} — пауза до {report.moscow(v[0])} МСК"
                             for k, v in sorted(pauses.items()))
-        return ("<b>🩺 Диагностика BorzMarket v10.0</b>\n" + "\n".join(settings) + "\n" + net.describe()
+        return (f"<b>🩺 Диагностика BorzMarket v{report.VERSION}</b>\n" + "\n".join(settings) + "\n" + net.describe()
                 + ("\n" + paused if paused else "") + "\n\n"
                 "Отправьте /diag и ссылку из приложения, либо <code>/diag ozon:1526882900</code> "
                 "или <code>/diag wb:866768707</code>.")
@@ -1534,7 +1539,11 @@ async def collect_links(
     draft = store.create(owner, message.chat.id, tuple(items))
     duplicate = duplicate_note(store, [item.product for item in items]) or early
     external_price = any(item.product.price_source in ("wbcon", "bhapi") for item in items)
-    if (AUTO_POST and CHANNEL_ID is not None and len(links) == 1 and draft.ready
+    recalled_price = any(item.product.price_origin == "memory" for item in items)
+    conditional_only = any(item.product.conditional_price is not None and item.product.price == item.product.conditional_price
+                           and item.product.price_note for item in items)
+    if (AUTO_POST and CHANNEL_ID is not None and len(links) == 1 and draft.ready and not recalled_price
+            and not conditional_only
             and not duplicate and not supplied and not external_price and not items[0].product.used_fallback):
         result, markup = await publish(bot, store, draft, CHANNEL_ID, avoid_repeat=True)
         await status.edit_text(result, reply_markup=markup)
@@ -1555,6 +1564,10 @@ async def collect_links(
         notices.append("Использованы данные из вашего сообщения. Проверьте черновик.")
     if external_price:
         notices.append("Цена из резервного источника добавлена в черновик. Сверьте её перед публикацией.")
+    if recalled_price:
+        notices.append("Цена восстановлена из памяти бота: площадка сейчас её не показала. Сверьте перед публикацией.")
+    if conditional_only:
+        notices.append("Площадка показала только условную цену (по карте или кошельку). Сверьте её перед публикацией.")
     if warnings and not draft.ready:
         notices.append("Данные можно дополнить в черновике.\n" + "\n".join(warnings))
     if notices:
@@ -1874,6 +1887,79 @@ async def on_callback(cb: CallbackQuery, bot: Bot, store: DraftStore, fetch_slot
     await cb.answer("Это действие сейчас недоступно.", show_alert=True)
 
 
+def create_bot() -> Bot:
+    """Отдельная сессия Bot API. Клиенты маркетплейсов используют свои настройки."""
+    proxy = os.getenv("TELEGRAM_PROXY", "").strip()
+    defaults = DefaultBotProperties(parse_mode=ParseMode.HTML)
+    if not proxy:
+        return Bot(BOT_TOKEN, default=defaults)
+
+    message = "Проверьте TELEGRAM_PROXY в .env. Укажите socks5://хост:порт или http://хост:порт."
+    try:
+        address = urlsplit(proxy)
+        if (address.scheme not in ("socks5", "http") or not address.hostname or not address.port
+                or address.path not in ("", "/") or address.query or address.fragment
+                or any(char.isspace() for char in proxy)):
+            raise ValueError
+        session = AiohttpSession(proxy=proxy)
+    except (ImportError, RuntimeError):
+        raise SystemExit("Установите прокси-зависимости: .venv/bin/python -m pip install -r requirements-telegram-proxy.txt") from None
+    except ValueError:
+        raise SystemExit(message) from None
+    return Bot(BOT_TOKEN, default=defaults, session=session)
+
+
+def hide_credentials(text: str) -> str:
+    """Убирает логин и пароль из адресов вида scheme://user:pass@host в тексте ошибки."""
+    return re.sub(r"([a-z0-9+.-]+://)[^/@\s]+@", r"\1***@", text, flags=re.IGNORECASE)
+
+
+def describe_connection_error(error: BaseException, via_proxy: bool) -> str:
+    """Короткая причина без traceback и без учётных данных."""
+    names = {type(item).__name__ for item in type(error).__mro__}
+    text = hide_credentials(str(error))[:160]
+    chain = error.__cause__ or error.__context__
+    if isinstance(chain, BaseException) and not text:
+        text = hide_credentials(str(chain))[:160]
+    if {"ProxyConnectionError", "ProxyError", "ProxyTimeoutError"} & names:
+        return f"Прокси недоступен или отказал: {text or type(error).__name__}"
+    if isinstance(error, socket.gaierror) or "Name or service not known" in text or "nodename nor servname" in text:
+        where = "адрес прокси" if via_proxy else "api.telegram.org"
+        return f"Не удалось найти {where} в DNS. Проверьте написание хоста в TELEGRAM_PROXY без лишних символов."
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)) or "timeout" in text.lower():
+        return "Истекло время ожидания ответа" + (" через прокси." if via_proxy else ".")
+    return f"Ошибка соединения ({type(error).__name__}): {text}" if text else f"Ошибка соединения ({type(error).__name__})."
+
+
+async def check_telegram() -> int:
+    """getMe без очереди, без базы и без вывода секретов. Код 0 — Bot API доступен, 1 — нет."""
+    if not BOT_TOKEN:
+        print("Задайте BOT_TOKEN в .env")
+        return 1
+    via_proxy = bool(os.getenv("TELEGRAM_PROXY", "").strip())
+    route = "через прокси" if via_proxy else "напрямую"
+    try:
+        async with create_bot() as bot:
+            try:
+                account = await bot.get_me(request_timeout=15)
+            except TelegramUnauthorizedError:
+                print("Telegram ответил. Проверьте значение BOT_TOKEN в .env.")
+                return 1
+            except TelegramAPIError as error:
+                if isinstance(error, TelegramNetworkError):
+                    raise
+                print(f"Telegram API вернул ошибку ({type(error).__name__}).")
+                return 1
+    except SystemExit as error:
+        print(hide_credentials(str(error)))
+        return 1
+    except Exception as error:  # сеть, DNS, SOCKS: коротко и без пароля
+        print(f"Не удалось подключиться к Telegram {route}. {describe_connection_error(error, via_proxy)}")
+        return 1
+    print(f"Telegram Bot API доступен {route}. Бот @{account.username}.")
+    return 0
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not BOT_TOKEN:
@@ -1881,9 +1967,11 @@ async def main() -> None:
     if not ADMIN_IDS:
         raise SystemExit("Задайте ADMIN_IDS в .env. Узнать свой ID можно командой /id.")
 
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = create_bot()
     store = DraftStore(DB_PATH)
     state.configure(DB_PATH)  # паузы источников и последние поля переживают перезапуск
+    if retired := store.retire_published():
+        log.warning("Сняты записи, уже опубликованные другой версией: %s", ", ".join(retired))
     dp = Dispatcher()
     dp.include_router(router)
     workers: list[asyncio.Task[None]] = []
@@ -1916,4 +2004,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check-telegram", action="store_true", help="Проверить getMe без запуска бота и очереди.")
+    if parser.parse_args().check_telegram:
+        raise SystemExit(asyncio.run(check_telegram()))
     asyncio.run(main())
