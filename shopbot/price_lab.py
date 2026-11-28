@@ -73,7 +73,10 @@ class Cassette:
 
     def put(self, key, response: httpx.Response) -> None:
         self.live += 1
-        self.items[key] = {"status": response.status_code, "headers": dict(response.headers),
+        # Тело уже распаковано: заголовки сжатия и длины при воспроизведении сломали бы разбор.
+        skipped = {"content-encoding", "content-length", "transfer-encoding"}
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in skipped}
+        self.items[key] = {"status": response.status_code, "headers": headers,
                            "body": base64.b64encode(response.content).decode()}
 
     def save(self) -> None:
@@ -150,19 +153,26 @@ async def run_mode(value: str, mode: str, cassette: Cassette) -> tuple[object, l
     return product, list(product.trace or events), cassette.replayed > replayed_before
 
 
-async def wbcon_probe(value: str, cassette: Cassette, waits: list) -> tuple[object | None, str, bool]:
+async def wbcon_probe(value: str, cassette: Cassette, waits: list, resolved: str = "") -> tuple[object | None, str, bool]:
     """Прямой запрос к WBCON. При лимите ждём разрешённое окно, без циклов повторов."""
     import prices
     import wbcon
     from card import ParseError, Product
-    market, url = prices.market_url(value)
+    from diagnostics import capture_events
+    from links import LinkError
+    try:
+        market, url = prices.market_url(resolved or value)  # короткая ссылка → адрес с артикулом из режима own
+    except LinkError as error:
+        return None, str(error), False
     product = Product(market, "", url)
     if not wbcon.available(product):
         return None, "WBCON не принимает размер или нестандартный регион", False
     replayed_before = cassette.replayed
     for attempt in range(2):
         try:
-            quote = await wbcon.lookup(product)
+            with capture_events() as events:
+                quote = await wbcon.lookup(product)
+            quote.trace = list(events)
             return quote, "", cassette.replayed > replayed_before
         except ParseError as error:
             pause = wbcon.paused(market)
@@ -178,6 +188,20 @@ async def wbcon_probe(value: str, cassette: Cassette, waits: list) -> tuple[obje
     return None, "лимит WBCON", False
 
 
+def main_status(events, source: str) -> str:
+    """HTTP-код источника цены, а не первого шага (короткой ссылки)."""
+    order = ("ozon.page", "wb.detail", "wbcon.", "bhapi.")
+    if source.startswith("wbcon"):
+        order = ("wbcon.",)
+    for prefix in order:
+        for event in reversed(events):
+            if event.source.startswith(prefix) and event.http:
+                return str(event.http)
+    if source.startswith("wbcon"):
+        return ""  # ответ WBCON из кэша процесса: своего HTTP-кода у этой строки нет
+    return next((str(e.http) for e in reversed(events) if e.http), "")
+
+
 def rows_for(run_id, env, mode, product, events, replayed, value, wbcon_calls=0, reason_override=""):
     import report
     from storefront import sku_in_url
@@ -187,7 +211,7 @@ def rows_for(run_id, env, mode, product, events, replayed, value, wbcon_calls=0,
                 source=getattr(product, "price_source", ""), origin=getattr(product, "price_origin", "") or "network",
                 observed_at=stamp(getattr(product, "price_at", None)),
                 fetched_at=stamp(getattr(product, "price_fetched_at", None) or time.time()),
-                http_status=next((str(e.http) for e in events if e.http), ""),
+                http_status=main_status(events, getattr(product, "price_source", "") if product else ""),
                 latency_ms=sum(e.ms or 0 for e in events), cache_hit=int(any(e.outcome == "cached" for e in events)),
                 replayed=int(replayed), title=(getattr(product, "title", "") or "")[:80],
                 photo_url=int(bool(getattr(product, "image_urls", None))),
@@ -231,10 +255,14 @@ def parse_moment(text: str) -> float | None:
     return None
 
 
-def compare(rows: list[dict], references: list[dict]) -> None:
+def compare(rows: list[dict], references: list[dict], *, self_reference: bool = False) -> None:
     for row in rows:
         if not row["amount_rub"]:
             row["comparable"] = "нет цены"
+            continue
+        if self_reference and row["origin"] != "aggregator":
+            # Цена витрины против той же витрины совпадает по построению: в точность не идёт.
+            row["comparable"] = "эталон из того же ответа"
             continue
         matches = [r for r in references if r["market"] == row["market"] and r["sku"] == row["sku"]
                    and payment_kind(r["payment"]) == payment_kind(row["payment"])]
@@ -277,7 +305,8 @@ def summarize(rows: list[dict], items: int) -> list[str]:
             photos = {r["sku"] for r in group if str(r.get("photo_ok")) == "1"}
             fresh_own = {r["sku"] for r in group if r["amount_rub"] and r["origin"] == "network"}
             reserve = {r["sku"] for r in group if r["amount_rub"] and r["origin"] == "aggregator"}
-            pairs = [r for r in group if r.get("comparable") == "да"]
+            unique = {(r["sku"], payment_kind(r["payment"])): r for r in group if r.get("comparable") == "да"}
+            pairs = list(unique.values())  # один товар по двум ссылкам считается одной парой
             devs = [abs(float(r["deviation_pct"])) for r in pairs]
             text = (f"{market} · {mode}: товаров {len(skus)}, обычная цена {len(priced)}, любая цена {len(any_price)}, "
                     f"название {len(titled)}, фото скачано {len(photos)}, свежие собственные {len(fresh_own)}, "
@@ -317,6 +346,7 @@ async def main_async(args) -> int:
     started = time.perf_counter()
     for number, value in enumerate(values, 1):
         print(f"[{number}/{len(values)}] {value}", flush=True)
+        resolved = ""
         for mode in modes:
             calls_before = sum(1 for k in cassette.items if "wbcon.su" in k)
             try:
@@ -324,16 +354,17 @@ async def main_async(args) -> int:
             except Exception as error:  # неверная ссылка, сбой разбора
                 rows += rows_for(run_id, args.env, mode, None, [], False, value, reason_override=str(error)[:160])
                 continue
+            resolved = resolved or product.url
             calls = sum(1 for k in cassette.items if "wbcon.su" in k) - calls_before
             rows += rows_for(run_id, args.env, mode, product, events, replayed, value, wbcon_calls=calls)
         if args.wbcon:
             before = sum(1 for k in cassette.items if "wbcon.su" in k)
-            quote, reason, replayed = await wbcon_probe(value, cassette, waits)
+            quote, reason, replayed = await wbcon_probe(value, cassette, waits, resolved)
             calls = sum(1 for k in cassette.items if "wbcon.su" in k) - before
             if quote is not None:
                 quote = replace(quote, price_origin="aggregator")
-            rows += rows_for(run_id, args.env, "wbcon", quote, [], replayed, value, wbcon_calls=calls,
-                             reason_override=reason)
+            rows += rows_for(run_id, args.env, "wbcon", quote, list(getattr(quote, "trace", None) or []), replayed,
+                             value, wbcon_calls=calls, reason_override=reason)
         if number < len(values):
             await asyncio.sleep(args.pause)
     references = []
@@ -347,7 +378,7 @@ async def main_async(args) -> int:
                 references.append(dict(market=r["market"], sku=r["sku"], region=r["region"], seller=r["seller"],
                                        variant=r["variant"], payment=r["payment"], reference_rub=r["amount_rub"],
                                        reference_at=r["fetched_at"], observed_by="витрина в этом запуске"))
-    compare(rows, references)
+    compare(rows, references, self_reference=bool(args.self_reference and not args.reference))
     cassette.save()
     out = args.out or Path(f"price_lab_{run_id}.csv")
     with out.open("w", encoding="utf-8", newline="") as stream:

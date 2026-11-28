@@ -275,6 +275,9 @@ async def _find_basket(client: httpx.AsyncClient, nm: int) -> tuple[int, dict] |
 
     order = basket_order(vol, _basket_cache.get(vol))
     first = await probe(order[0])
+    if first is None and failures:
+        await asyncio.sleep(0.5)  # предсказанный сервер дал сбой, а не 404: одна повторная попытка
+        first = await probe(order[0])
     if first:
         _basket_cache[vol] = first[0]
         return first

@@ -62,6 +62,34 @@ class PriceLabTests(CleanState, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe["deviation_pct"], "3.73")
         self.assertTrue(any(r["payment"] == "С банками" for r in rows))
 
+    async def test_replay_of_compressed_answer_keeps_text(self):
+        """Ответ пришёл сжатым: запись хранит распакованное тело без заголовка сжатия."""
+        import gzip
+        body = gzip.compress("<html>цена 2972</html>".encode())
+
+        def reply(request):
+            return httpx.Response(200, headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
+                                  content=body)
+        cassette = price_lab.Cassette()
+        original = httpx.AsyncClient.send
+        try:
+            price_lab.install_cassette(cassette)
+            async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+                live = await client.get("https://www.ozon.ru/product/1/")
+                again = await client.get("https://www.ozon.ru/product/1/")
+        finally:
+            httpx.AsyncClient.send = original
+        self.assertEqual((live.text, again.text), ("<html>цена 2972</html>",) * 2)
+        self.assertEqual((cassette.live, cassette.replayed), (1, 1))
+        self.assertNotIn("content-encoding", {k.lower() for k in next(iter(cassette.items.values()))["headers"]})
+
+    def test_status_comes_from_price_source_not_short_link(self):
+        from diagnostics import Event
+        events = [Event("ozon.link", "error", http=403), Event("ozon.page", "ok", http=200)]
+        self.assertEqual(price_lab.main_status(events, "ozon_page"), "200")
+        events.append(Event("wbcon.ozon", "limit", http=429))
+        self.assertEqual(price_lab.main_status(events, "wbcon"), "429")
+
     def test_template_has_separate_columns_for_regular_and_card_price(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "t.csv"
